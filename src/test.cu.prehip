@@ -1,6 +1,5 @@
-#include "hip/hip_runtime.h"
 #include <iostream>
-#include <hip/hip_runtime.h>
+#include <cuda.h>
 #include "fused_attn.cuh"
 
 __global__
@@ -41,26 +40,26 @@ int main() {
     half_t* values;
     half_t* output;
 
-    CHECK_CUDA_ERROR(hipMalloc(&queries, size_bytes));
-    CHECK_CUDA_ERROR(hipMalloc(&keys, size_bytes));
-    CHECK_CUDA_ERROR(hipMalloc(&values, size_bytes));
-    CHECK_CUDA_ERROR(hipMalloc(&output, size_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&queries, size_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&keys, size_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&values, size_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(&output, size_bytes));
 
     fill_values<<<1, 1>>>(size, 1, queries);
     fill_values<<<1, 1>>>(size, 2, keys);
     fill_values<<<1, 1>>>(size, 3, values);
-    CHECK_CUDA_ERROR(hipDeviceSynchronize());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
     print_matrix<<<1, 1>>>(16, 16, queries, num_features);
-    CHECK_CUDA_ERROR(hipDeviceSynchronize());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
     launch_attention_kernel<head_dim, chunk_size>(batch_size, seq_len, num_features,
                                                   queries, keys, values, nullptr, output);
-    CHECK_CUDA_ERROR(hipDeviceSynchronize());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
     CHECK_LAST_CUDA_ERROR();      
 
     print_matrix<<<1, 1>>>(16, 16, output, num_features);
-    CHECK_CUDA_ERROR(hipDeviceSynchronize());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
 
     return 0;
 }

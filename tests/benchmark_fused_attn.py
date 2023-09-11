@@ -7,11 +7,11 @@ from naive_implementation import attention
 
 def bench():
     batch_size = 4
-    num_heads = 40
+    num_heads = 32
     head_dim = 128
-    chunk_size = 128
+    chunk_size = 32
     num_features = num_heads * head_dim
-    sequence_len = 2048
+    sequence_len = 32
     num_batchs = 128
     
     torch.random.manual_seed(179)

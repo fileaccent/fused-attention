@@ -65,3 +65,18 @@ class TestFusedAttn(unittest.TestCase):
     
     def test_simple_h128_c128(self):
         self.run_simple_test(128, 128)
+
+if __name__ == "__main__":
+    test = TestFusedAttn()
+    test.run_simple_test(16, 16)
+    test.run_simple_test(16, 32)
+    test.run_simple_test(32, 16)
+    test.run_simple_test(32, 32)
+    test.run_simple_test(32, 64)
+    test.run_simple_test(64, 16)
+    test.run_simple_test(64, 32)
+    test.run_simple_test(64, 64)
+    test.run_simple_test(64, 128)
+    test.run_simple_test(128, 32)
+    test.run_simple_test(128, 64)
+    # test.run_simple_test(128, 128)
