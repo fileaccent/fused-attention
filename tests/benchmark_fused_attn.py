@@ -4,25 +4,25 @@ import time
 import fused_attn
 
 from naive_implementation import attention
-
+import numpy as np
 def bench():
     batch_size = 4
     num_heads = 32
     head_dim = 128
-    chunk_size = 32
+    chunk_size = 16
     num_features = num_heads * head_dim
-    sequence_len = 32
+    sequence_len = 16
     num_batchs = 128
     
     torch.random.manual_seed(179)
 
     torch.set_default_tensor_type(torch.cuda.HalfTensor)
-    queries = torch.randn(batch_size, sequence_len, num_features, device="cuda")
-    keys = torch.randn(batch_size, sequence_len, num_features, device="cuda")
-    values = torch.randn(batch_size, sequence_len, num_features, device="cuda")
+    queries = torch.rand(batch_size, sequence_len, num_features, device="cuda")
+    keys =    torch.rand(batch_size, sequence_len, num_features, device="cuda")
+    values =  torch.rand(batch_size, sequence_len, num_features, device="cuda")
 
-    time.sleep(10) # cooldown gpu after tensors' initialization
-
+    # time.sleep(10) # cooldown gpu after tensors' initialization
+    _ = attention(queries, keys, values, head_dim)
     start = time.time()
     for i in range(num_batchs):
         _ = attention(queries, keys, values, head_dim)
@@ -31,8 +31,8 @@ def bench():
 
     naive_ms = (end - start) / num_batchs * 1000
 
-    time.sleep(20) # cooldown gpu after calculations
-
+    # time.sleep(20) # cooldown gpu after calculations
+    _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
     start = time.time()
     for _ in range(num_batchs):
         _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
@@ -43,6 +43,24 @@ def bench():
 
     print(f"Naive {naive_ms:.4f} ms")
     print(f"Fused {fused_ms:.4f} ms")
+    
+    output = attention(queries, keys, values, head_dim)
 
+    output_fu = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
+    
+    print("output:", np.array((output)[0][0].cpu()).tolist()[0:16])
+    print("output_fu:", np.array((output_fu)[0][0].cpu()).tolist()[0:16])
+    print("output_error:", np.array((output - output_fu)[0][0].cpu()).tolist()[0:16])
+    # absolute_error = (output - output_fu).abs().max().item()
+    # # print(absolute_error)
+    # # print(queries)
+    # # print(keys)
+    # # print(values)
+    # # print(output)
+    # relative_error = ((output - output_fu) / output).abs().max().item()
+    # # print(relative_error)
+    # # print(output)
+    # # print(output_fu)
+    # print(absolute_error, relative_error)
 if __name__ == "__main__":
     bench()

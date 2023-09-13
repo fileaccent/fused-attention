@@ -26,7 +26,12 @@ class TestFusedAttn(unittest.TestCase):
 
         expected = attention(queries, keys, values, head_dim)
         actual = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
-
+        # absolute_error = (expected - actual).abs().max().item()
+        # relative_error = ((expected - actual) / torch.max(expected, actual)).abs().max().item()
+        # print("absolute_error:", absolute_error, "absolute_error:", relative_error)
+        # print(expected)
+        # print(actual)
+       
         torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.01)  # tolerance is smaller than default values because of the half precision
 
     

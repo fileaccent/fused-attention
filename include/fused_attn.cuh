@@ -17,6 +17,8 @@ using rocwmma::float32_t;
 constexpr uint32_t warp_size = 64;
 
 
+#define FLOAT2(pointer) (reinterpret_cast<float2*>((void *)&(pointer))[0])
+
 #define CHECK_CUDA_ERROR(val) checkCudaError((val), #val, __FILE__, __LINE__)
 template <typename T>
 void checkCudaError(T err, char const* const func, char const* const file,
@@ -57,11 +59,10 @@ __device__ half2 __hmax2(half2 a, half2 b) {
     tmp1 = __hgt(__low2half(a), __low2half(b)) ? __low2half(a) : __low2half(b);
     return __halves2half2(tmp1, tmp2);
 }
-
-
 /*
 * Loads matrix from global to shared memory (row-wise)
 */
+// chunk_size, head_dim, n_warps
 template <uint32_t height, uint32_t width, uint32_t n_warps>
 __device__
 void threadblock_load_chunk(
@@ -90,6 +91,52 @@ void threadblock_load_chunk(
     }
 }
 
+template <uint32_t height, uint32_t width, uint32_t n_warps>
+__device__
+void threadblock_load_chunk(
+    const half_t* __restrict__ src,
+    half_t* __restrict__ dst,
+    uint32_t lds,
+    uint32_t ldd,
+    uint32_t seq_len
+) {
+    constexpr uint32_t elements_per_storage = 4; // 8 half_t == 1x uint4 == 128 bit
+    constexpr uint32_t n_threads = warp_size * n_warps;
+    constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+    static_assert(n_threads * elements_per_storage % width == 0);
+
+    const uint32_t lane_idx = threadIdx.x;
+    const uint32_t warp_idx = threadIdx.y;
+
+    const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+    
+    const uint32_t row = storage_idx / width;
+    const uint32_t col = storage_idx % width;
+    #pragma unroll
+    for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+        if (offset + row < seq_len) {
+            *(uint2*)&dst[(offset + row) * ldd + col] = *(uint2*)&src[(offset + row) * lds + col];
+        } else {
+            dst[(offset + row) * ldd + col] = __float2half(0.0f);
+            dst[(offset + row) * ldd + col + 1] = __float2half(0.0f);
+            dst[(offset + row) * ldd + col + 2] = __float2half(0.0f);
+            dst[(offset + row) * ldd + col + 3] = __float2half(0.0f);
+        }
+    }
+    // if (row < seq_len) {
+    //     #pragma unroll
+    //     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+    //         *(uint4*)&dst[(offset + row) * ldd + col] = *(uint4*)&src[(offset + row) * lds + col];
+    //     }
+    // } else {
+    //     #pragma unroll
+    //     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+    //         dst[(offset + row) * ldd + col] = __float2half(0.0f);
+    //     }
+    // }
+}
+
 /*
 * Stores matrix chunk from shared to global memory (row-wise)
 */
@@ -101,7 +148,7 @@ void threadblock_store_chunk(
     uint32_t lds,
     uint32_t ldd
 ) {
-    constexpr uint32_t elements_per_storage = 8;
+    constexpr uint32_t elements_per_storage = 4;
     constexpr uint32_t n_threads = warp_size * n_warps;
     constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
 
@@ -116,7 +163,7 @@ void threadblock_store_chunk(
 
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        *(uint4*)&dst[(offset + row) * ldd + col] = *(uint4*)&src[(offset + row) * lds + col];
+        *(uint2*)&dst[(offset + row) * ldd + col] = *(uint2*)&src[(offset + row) * lds + col];
     }
 }
 
@@ -125,6 +172,7 @@ void threadblock_store_chunk(
 * of the softmax aggregated numerator which is sum(exp(QK.T)V) and denominator which is sum(exp(QK.T))
 * fused operation reduces some loads/stores between shared memory and registers
 */
+// chunk_size, head_dim, n_warps
 template <uint32_t height, uint32_t width, uint32_t n_warps>
 __device__
 void threadblock_divide_and_store_chunk(
@@ -134,7 +182,7 @@ void threadblock_divide_and_store_chunk(
     uint32_t lds,
     uint32_t ldd
 ) {
-    constexpr uint32_t elements_per_storage = 2;
+    constexpr uint32_t elements_per_storage = 1;
     constexpr uint32_t n_threads = warp_size * n_warps;
     constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
 
@@ -154,6 +202,55 @@ void threadblock_divide_and_store_chunk(
             __half2half2(denom[offset + row])
         );
     }
+}
+
+template <uint32_t height, uint32_t width, uint32_t n_warps>
+__device__
+void threadblock_divide_and_store_chunk(
+    const half_t* __restrict__ numer,
+    const half_t* __restrict__ denom,
+    half_t* __restrict__ dst,
+    uint32_t lds,
+    uint32_t ldd,
+    uint32_t seq_len
+) {
+    constexpr uint32_t elements_per_storage = 2;
+    constexpr uint32_t n_threads = warp_size * n_warps;
+    constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+    // static_assert(n_threads * elements_per_storage % width == 0);
+
+    const uint32_t lane_idx = threadIdx.x;
+    const uint32_t warp_idx = threadIdx.y;
+    const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+    
+    const uint32_t row = storage_idx / width;
+    const uint32_t col = storage_idx % width;
+    #pragma unroll
+    for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+        if (offset + row < seq_len) {
+            *(half2_t*)&dst[(offset + row) * ldd + col] = __h2div(
+                *(half2_t*)&numer[(offset + row) * lds + col],
+                __half2half2(denom[offset + row])
+            );
+            // printf("%f %f \n", __half2float(numer[(offset + row) * lds + col]), __half2float(denom[offset + row]));
+            // dst[(offset + row) * ldd + col] = __hdiv(
+            //     numer[(offset + row) * lds + col],
+            //     denom[offset + row]
+            // );
+
+            // dst[(offset + row) * ldd + col] = numer[0];
+        }
+    }
+    // if (row < seq_len) {
+    //     #pragma unroll
+    //     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+    //         *(half2_t*)&dst[(offset + row) * ldd + col] = __h2div(
+    //             *(half2_t*)&numer[(offset + row) * lds + col],
+    //             __half2half2(denom[offset + row])
+    //         );
+    //     }
+    // }
 }
 
 /*
@@ -243,6 +340,164 @@ void threadblock_gemm(
     }
 }
 
+template < uint32_t m, uint32_t n, uint32_t k, int n_warps, 
+        bool transpose_b=false, bool alpha_is_one=true, bool preloaded_a_frags=false >
+__device__
+void threadblock_gemm_k_real(
+    rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> mat_a_frags[m / 16][k / 16],
+    const half_t* __restrict__ mat_a,
+    const half_t* __restrict__ mat_b,
+    half_t* __restrict__ mat_c,
+    uint32_t m_real,
+    uint32_t n_real,
+    uint32_t k_real,
+    uint32_t lda,
+    uint32_t ldb,
+    uint32_t ldc,
+    __half alpha = __float2half(1.0f)
+) {
+    const uint32_t seq_len = k_real;
+    constexpr uint32_t frag_cols_per_warp = n / (16 * n_warps); // num of columns processed by single warp (in terms of fragments)
+    constexpr uint32_t frag_rows = m / 16; // num of fragments in rows in output matrix
+    constexpr uint32_t frag_cols = n / 16; // num of fragments in cols in output matrix
+    constexpr uint32_t frag_dims = k / 16; // size of common dimention of a and b matrices (in fragments)
+
+    static_assert(n_warps * frag_cols_per_warp == frag_cols);
+    static_assert(n % (n_warps * 16) == 0);
+
+    using mat_b_order = std::conditional_t<transpose_b, rocwmma::col_major, rocwmma::row_major>;
+
+    rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> frag_a;
+    rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, rocwmma_half, mat_b_order> frag_b[frag_dims][frag_cols_per_warp];
+    rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, rocwmma_half> frag_acc;
+
+    const uint32_t warp_idx = threadIdx.y;
+
+    // Load mat b to fragments distributed by cols between warps 
+    // if n_warps is smaller than fragments' columns then one warp works with several columns
+    #pragma unroll
+    for (uint32_t frag_dim = 0; frag_dim < frag_dims; ++frag_dim) {
+        #pragma unroll
+        for (uint32_t frag_col_offset = 0; frag_col_offset < frag_cols_per_warp; frag_col_offset++) {
+            const uint32_t frag_col = warp_idx * frag_cols_per_warp + frag_col_offset; 
+            
+            if (transpose_b) {
+                int n_index = threadIdx.x / 16;
+                int m_index = threadIdx.x % 16;
+                int B_m_index = m_index;
+                int B_n_index = n_index * 4;
+                auto d_B = &mat_b[16 * (frag_dim + frag_col * ldb)];
+                half reg_B[4] = {__float2half(0.0f)};
+                // FLOAT2(reg_B[0]) = FLOAT2(d_B[B_m_index * ldb + B_n_index]);
+                if (16 * frag_col + B_m_index < n_real) {
+                    // FLOAT2(reg_B[0]) = FLOAT2(d_B[B_m_index * ldb + B_n_index]);
+                    if (16 * frag_dim + B_n_index < k_real) reg_B[0] = d_B[B_m_index * ldb + B_n_index];
+                    if (16 * frag_dim + B_n_index + 1 < k_real) reg_B[1] = d_B[B_m_index * ldb + B_n_index + 1];
+                    if (16 * frag_dim + B_n_index + 2 < k_real) reg_B[2] = d_B[B_m_index * ldb + B_n_index + 2];
+                    if (16 * frag_dim + B_n_index + 3 < k_real) reg_B[3] = d_B[B_m_index * ldb + B_n_index + 3];
+                }
+                frag_b[frag_dim][frag_col_offset].x[0] = reg_B[0];
+                frag_b[frag_dim][frag_col_offset].x[1] = reg_B[1];
+                frag_b[frag_dim][frag_col_offset].x[2] = reg_B[2];
+                frag_b[frag_dim][frag_col_offset].x[3] = reg_B[3];
+                
+                // int n_index = threadIdx.x % 16;
+                // int m_index = threadIdx.x / 16;
+                // int B_m_index = m_index * 4;
+                // int B_n_index = n_index;
+                // int B_index = B_m_index * ldb + B_n_index;
+                // auto d_B = &mat_b[16 * (frag_dim + frag_col * ldb)];
+                // frag_b[frag_dim][frag_col_offset].x[0] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
+                // // fragB.x[0] = d_B[B_index];
+                // B_m_index++;
+                // B_index += ldb;
+                // frag_b[frag_dim][frag_col_offset].x[1] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
+                // // fragB.x[1] = d_B[B_index];
+                // B_m_index++;
+                // B_index += ldb;
+                // frag_b[frag_dim][frag_col_offset].x[2] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
+                // // fragB.x[2] = d_B[B_index];
+                // B_m_index++;
+                // B_index += ldb;
+                // frag_b[frag_dim][frag_col_offset].x[3] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
+                // rocwmma::load_matrix_sync(frag_b[frag_dim][frag_col_offset],
+                //                     &mat_b[16 * (frag_dim + frag_col * ldb)], ldb);
+            } else {
+                int n_index = threadIdx.x % 16;
+                int m_index = threadIdx.x / 16;
+                int B_m_index = m_index * 4;
+                int B_n_index = n_index;
+                int B_index = B_m_index * ldb + B_n_index;
+                auto d_B = &mat_b[16 * (frag_dim * ldb + frag_col)];
+                frag_b[frag_dim][frag_col_offset].x[0] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
+                // fragB.x[0] = d_B[B_index];
+                B_m_index++;
+                B_index += ldb;
+                frag_b[frag_dim][frag_col_offset].x[1] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
+                // fragB.x[1] = d_B[B_index];
+                B_m_index++;
+                B_index += ldb;
+                frag_b[frag_dim][frag_col_offset].x[2] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
+                // fragB.x[2] = d_B[B_index];
+                B_m_index++;
+                B_index += ldb;
+                frag_b[frag_dim][frag_col_offset].x[3] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
+            }
+        }
+    }
+
+    // Iter trough rows
+    #pragma unroll
+    for (uint32_t frag_row = 0; frag_row < frag_rows; ++frag_row) {
+
+        // Iter trough columns of single warp
+        #pragma unroll
+        for (uint32_t frag_col_offset = 0; frag_col_offset < frag_cols_per_warp; ++frag_col_offset) {
+            const uint32_t frag_col = warp_idx * frag_cols_per_warp + frag_col_offset;
+
+            rocwmma::fill_fragment(frag_acc, __float2half(0.0f));
+            
+            #pragma unroll
+            for (uint32_t frag_dim = 0; frag_dim < frag_dims; ++frag_dim) {
+                if (preloaded_a_frags) {
+                    rocwmma::mma_sync(frag_acc, mat_a_frags[frag_row][frag_dim], frag_b[frag_dim][frag_col_offset], frag_acc);
+                } else {
+                    rocwmma::load_matrix_sync(frag_a, &mat_a[16 * (frag_row * lda) + 16 * frag_dim], lda);
+
+                    // int n_index = threadIdx.x / 16;
+                    // int m_index = threadIdx.x % 16;
+                    // int B_m_index = m_index;
+                    // int B_n_index = n_index * 4;
+
+                    // if (!(B_m_index < seq_len && B_n_index < seq_len)) {
+                    //     frag_a.x[0] = __float2half(0.0f);
+                    // }
+                    // if (!(B_m_index < seq_len && B_n_index + 1 < seq_len)) {
+                    //     frag_a.x[1] = __float2half(0.0f);
+                    // }
+                    // if (!(B_m_index < seq_len && B_n_index + 2 < seq_len)) {
+                    //     frag_a.x[2] = __float2half(0.0f);
+                    // }
+                    // if (!(B_m_index < seq_len && B_n_index + 3 < seq_len)) {
+                    //     frag_a.x[3] = __float2half(0.0f);
+                    // }
+                    rocwmma::mma_sync(frag_acc, frag_a, frag_b[frag_dim][frag_col_offset], frag_acc);    
+                }
+            }
+
+            // multiply result by alpha
+            if (!alpha_is_one) {
+                for(int t = 0; t < frag_acc.num_elements; t++) {
+                    frag_acc.x[t] = __hmul(frag_acc.x[t], alpha);
+                }
+            }
+
+            rocwmma::store_matrix_sync(&mat_c[16 * (frag_row * ldc + frag_col)], frag_acc, ldc, rocwmma::mem_row_major);
+        }
+
+    }
+}
+
 /*
 * Calculates rowwise sums of matrix
 * Uses additional auxillary matrix which should be of size (height, 16) to store fragmens with rowwise sums into shared memory
@@ -286,9 +541,10 @@ void threadblock_row_sum(
         // Store in transposed mem to obtain all row-wise sums in coaleced vector in aux memory
         rocwmma::store_matrix_sync(&aux[16 * frag_row], frag_acc, ldm_aux, rocwmma::mem_col_major);
     }
+    
+    __syncthreads();
 
     if (copy_to_vec) {
-        __syncthreads();
 
         if (storage_idx < height) {
             *(half2_t*)&vec[storage_idx] = *(half2_t*)&aux[storage_idx];
@@ -445,7 +701,8 @@ __device__
 void threadblock_row_broadcast_diff_and_exp(
     half_t* __restrict__ mat,
     const half_t* __restrict__ vec,
-    uint32_t ldm
+    uint32_t ldm,
+    uint32_t seq_len
 ) {
     constexpr uint32_t elements_per_storage = 2;
     constexpr uint32_t n_threads = warp_size * n_warps;
@@ -463,8 +720,10 @@ void threadblock_row_broadcast_diff_and_exp(
 
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        const uint32_t idx = (offset + row) * ldm + col;
-        *(half2_t*)&mat[idx] = h2exp(__hsub2(*(half2_t*)&mat[idx], __half2half2(vec[offset + row])));
+        if ((offset + row) < seq_len && col < seq_len) {
+            const uint32_t idx = (offset + row) * ldm + col;
+            *(half2_t*)&mat[idx] = h2exp(__hsub2(*(half2_t*)&mat[idx], __half2half2(vec[offset + row])));
+        }
     }
 }
 
@@ -478,6 +737,7 @@ void threadblock_row_broadcast_diff_and_exp(
 *      denom_a = denom_a + denom_b
 * but all numers represented as x' = exp(max_x) * x and exponentials are not caclulated due to computation errors
 */
+// chunk_size, head_dim, n_warps
 template <uint32_t height, uint32_t width, uint32_t n_warps>
 __device__
 void threadblock_aggregate_softmax(
@@ -508,7 +768,6 @@ void threadblock_aggregate_softmax(
         *a2_ptr = h2exp(__hsub2(*a2_ptr, *max_ab2_ptr));
         *b2_ptr = h2exp(__hsub2(*b2_ptr, *max_ab2_ptr));
         
-        // printf("max_ab2_ptr: %f %f  %f %f %f %f %f %f \n", (float)__high2half(mid_value) - (float)__high2half(*max_ab2_ptr), (float)__low2half(mid_value) - (float)__low2half(*max_ab2_ptr), expf((float)__high2half(mid_value) - (float)__high2half(*max_ab2_ptr)), expf((float)__low2half(mid_value) - (float)__low2half(*max_ab2_ptr)), (float)__high2half(mid_value), (float)__low2half(mid_value), (float)__high2half(*max_ab2_ptr), (float)__low2half(*max_ab2_ptr));
         *(half2_t*)&denom_a[storage_idx] = __hadd2(__hmul2(*a2_ptr, *(half2_t*)&denom_a[storage_idx]),
                                                 __hmul2(*b2_ptr, *(half2_t*)&denom_b[storage_idx]));
     }
@@ -690,7 +949,7 @@ void attention_kernel(
     queries_chunk = numer;
     scores_chunk = &numer_local[16 * numer_local_ldm];
 
-    const uint32_t num_chanks = seq_len / chunk_size;
+    const uint32_t num_chanks = (seq_len + chunk_size - 1) / chunk_size;
 
     const uint32_t batch_idx = blockIdx.x;
     const uint32_t q_row_chunk = blockIdx.y;
@@ -704,15 +963,26 @@ void attention_kernel(
     const uint32_t head_col = head_col_chunk * head_dim;
     
     rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> query_frags[chunk_frags][head_frags];
-
+    // batch_size, sequence_len, num_heads, head_dim
     // Load query chunk into shared memory
     threadblock_load_chunk<chunk_size, head_dim, n_warps>(
         /*src = */ &queries[batch_offset + q_row * num_features + head_col],
         /*dst = */ queries_chunk,
         /*lds = */ num_features,
-        /*ldd = */ queries_chunk_ldm
+        /*ldd = */ queries_chunk_ldm,
+        /*seq_len*/seq_len
     );
 
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+    //     printf("queries_chunk: \n");
+    //     for (int i = 0; i < chunk_size; i++) {
+    //         for (int j = 0; j < head_dim; j++) {
+    //             printf("%.1f ", __half2float(queries_chunk[i * queries_chunk_ldm + j]));
+    //         }
+    //         printf("\n");
+    //     }
+    //     printf("\n");
+    // }
     __syncthreads();
 
     // Move query chunk into warps' fragments, query_chunk is freed here and can be used later as numer
@@ -729,17 +999,31 @@ void attention_kernel(
         const uint32_t kv_row = kv_row_chunk * chunk_size;
         
         // scores_chunk = queries_chunk @ keys_chunk.T / sqrt(head_dim)
-        threadblock_gemm< /*m=*/chunk_size, /*n=*/chunk_size, /*k=*/head_dim, n_warps,
+        threadblock_gemm_k_real< /*m=*/chunk_size, /*n=*/chunk_size, /*k=*/head_dim, n_warps,
                         /*transpose_b=*/true, /*alpha_is_one=*/false, /*preloaded_a_frags=*/true >(
             /*mat_a_frags=*/ query_frags,
             /*mat_a =*/ nullptr,
             /*mat_b =*/ &keys[batch_offset + kv_row * num_features + head_col],
             /*mat_c =*/ scores_chunk,
+                      seq_len,
+                      seq_len,
+                      head_dim,
             /*lda =*/ 0,
             /*ldb =*/ num_features,
             /*ldc =*/ scores_chunk_ldm,
             /*alpha =*/ __float2half(rsqrtf(head_dim))
         );
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+
+        //     printf("scores_chunk: \n");
+        //     for (int i = 0; i < chunk_size; i++) {
+        //         for (int j = 0; j < chunk_size; j++) {
+        //             printf("%.1f ", __half2float(scores_chunk[i * queries_chunk_ldm + j]));
+        //         }
+        //         printf("\n");
+        //     }
+        //     printf("\n");
+        // }
 
         __syncthreads();
 
@@ -755,7 +1039,8 @@ void attention_kernel(
                     /*ldb =*/ seq_len
                 );
             }
-
+        }
+        if (kv_row_chunk == 0) {
             // scores_max = max(scores_chunk, dim=1)
             threadblock_row_max<chunk_size, chunk_size, n_warps>(
                 /*matrix =*/ scores_chunk,
@@ -764,19 +1049,42 @@ void attention_kernel(
                 /*ldm =*/ scores_chunk_ldm,
                 /*ldm_aux =*/ reduce_max_ldm
             );
+        }
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
 
+        //     printf("scores_max: \n");
+        //     for (int i = 0; i < chunk_size; i++) {
+        //         printf("%.1f ", __half2float(scores_max[i]));
+        //     }
+        //     printf("\n");
+        // }
 
-            __syncthreads();
-
+        __syncthreads();
+        
+        if (kv_row_chunk == 0) {
             // scores_chunk = exp(scores_chunk - scores_max[:, None])
             threadblock_row_broadcast_diff_and_exp<chunk_size, chunk_size, n_warps>(
                 /*matrix =*/ scores_chunk,
                 /*column =*/ scores_max,
-                /*ldm =*/ scores_chunk_ldm
+                /*ldm =*/ scores_chunk_ldm,
+                seq_len
             );
+        }
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
 
-            __syncthreads();
+        //     printf("scores_chunk_row_broadcast_diff_and_exp: \n");
+        //     for (int i = 0; i < chunk_size; i++) {
+        //         for (int j = 0; j < head_dim; j++) {
+        //             printf("%.1f ", __half2float(scores_chunk[i * queries_chunk_ldm + j]));
+        //         }
+        //         printf("\n");
+        //     }
+        //     printf("\n");
+        // }
 
+        __syncthreads();
+        
+        if (kv_row_chunk == 0) {
             // denom = scores_chunk.sum(dim=1)
             threadblock_row_sum<chunk_size, chunk_size, n_warps>(
                 /*mat = */ scores_chunk,
@@ -785,25 +1093,43 @@ void attention_kernel(
                 /*ldm = */ scores_chunk_ldm,
                 /*ldm_aux = */ reduce_sum_ldm
             );
-
-            __syncthreads();
-
+        }
+        
+        __syncthreads();
+        
+        if (kv_row_chunk == 0) {
             // numer = scores_chunk @ values_chunk
-            threadblock_gemm< /*m=*/chunk_size, /*n=*/head_dim, /*k=*/chunk_size, n_warps, 
+            threadblock_gemm_k_real< /*m=*/chunk_size, /*n=*/head_dim, /*k=*/chunk_size, n_warps, 
                             /*transpose_b=*/false, /*alpha_is_one=*/true, /*preloaded_a_frags=*/false >(
                 /*mat_a_frags = */ nullptr,
                 /*mat_a = */ scores_chunk,
                 /*mat_b = */ &values[batch_offset + head_col],
                 /*mat_c = */ numer,
+                /*m_real = */ seq_len,
+                /*n_real = */ head_dim,
+                /*k_real = */ seq_len,
                 /*lda = */ scores_chunk_ldm,
                 /*ldb = */ num_features,
                 /*ldc = */ numer_ldm
             );
 
-        } else {
-            // Second and further iterations, write to temprorary numer_local, denom_local, scores_max_local, then aggregate with prev values
+        }
+    //    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
 
-            // scores_max = max(scores_chunk, dim=1)
+    //         printf("numer: \n");
+    //         for (int i = 0; i < chunk_size; i++) {
+    //             for (int j = 0; j < head_dim; j++) {
+    //                 printf("%.1f ", __half2float(numer[i * queries_chunk_ldm + j]));
+    //             }
+    //             printf("\n");
+    //         }
+    //         printf("\n");
+    //     }
+
+        // Second and further iterations, write to temprorary numer_local, denom_local, scores_max_local, then aggregate with prev values
+
+        // scores_max = max(scores_chunk, dim=1)
+        if (kv_row_chunk != 0) {
             threadblock_row_max<chunk_size, chunk_size, n_warps>(
                 /*matrix =*/ scores_chunk,
                 /*column =*/ scores_max_local,
@@ -811,18 +1137,23 @@ void attention_kernel(
                 /*ldm =*/ scores_chunk_ldm,
                 /*ldm_aux =*/ reduce_max_ldm
             );
+        }
 
-            __syncthreads();
+        __syncthreads();
 
+        if (kv_row_chunk != 0) {
             // scores_chunk = exp(scores_chunk - scores_max[:, None])
             threadblock_row_broadcast_diff_and_exp<chunk_size, chunk_size, n_warps>(
                 /*matrix =*/ scores_chunk,
                 /*column =*/ scores_max_local,
-                /*ldm =*/ scores_chunk_ldm
+                /*ldm =*/ scores_chunk_ldm,
+                seq_len
             );
+        }
+        
+        __syncthreads();
 
-            __syncthreads();
-
+        if (kv_row_chunk != 0) {
             // denom_local = scores_chunk.sum(dim=1)
             threadblock_row_sum<chunk_size, chunk_size, n_warps, /*copy_to_vec=*/true>(
                 /*mat = */ scores_chunk,
@@ -831,25 +1162,30 @@ void attention_kernel(
                 /*ldm = */ scores_chunk_ldm,
                 /*ldm_aux = */ reduce_sum_ldm
             );
-
+        }
             
-            __syncthreads();
+        __syncthreads();
 
-
+        if (kv_row_chunk != 0) {
             // numer_local = scores_chunk @ values_chunk
-            threadblock_gemm< /*m=*/chunk_size, /*n=*/head_dim, /*k=*/chunk_size, n_warps, 
+            threadblock_gemm_k_real< /*m=*/chunk_size, /*n=*/head_dim, /*k=*/chunk_size, n_warps, 
                             /*transpose_b=*/false, /*alpha_is_one=*/true, /*preloaded_a_frags=*/false >(
                 /*mat_a_frags = */ nullptr,
                 /*mat_a = */ scores_chunk,
                 /*mat_b = */ &values[batch_offset + kv_row * num_features + head_col],
                 /*mat_c = */ numer_local,
+                /*m_real = */ seq_len,
+                /*n_real = */ head_dim,
+                /*k_real = */ seq_len,
                 /*lda = */ scores_chunk_ldm,
                 /*ldb = */ num_features,
                 /*ldc = */ numer_local_ldm
             );
-
-            __syncthreads();
-
+        }
+        
+        __syncthreads();
+        
+        if (kv_row_chunk != 0) {
             threadblock_aggregate_softmax<chunk_size, head_dim, n_warps>(
                 /*numer_a = */ numer,
                 /*denom_a = */ denom,
@@ -861,7 +1197,6 @@ void attention_kernel(
                 /*ldb =*/ numer_local_ldm,
                 /*aux =*/ aux_mem
             );
-
         }
     }
 
@@ -872,7 +1207,8 @@ void attention_kernel(
         /*denom = */ denom,
         /*dst = */ &output[batch_offset + q_row * num_features + head_col],
         /*lds = */ numer_ldm,
-        /*ldd = */ num_features
+        /*ldd = */ num_features,
+        /*seq_len*/seq_len
     );
 }
 
@@ -892,14 +1228,19 @@ void launch_attention_kernel(
     constexpr uint32_t max_size = chunk_size > head_dim ? chunk_size : head_dim;
     constexpr uint32_t shared_mem_size = ( chunk_size * (head_dim + 8) + (chunk_size + 16) * (max_size + 8) + 
                                         16 * (chunk_size + 8) + 4 * chunk_size ) * sizeof(half_t);
+    if (warp_size * n_warps >= 1024) {
+        printf("kernel thread in block is greater than 1024!\n");
+        return;
+    }
     // Call attention kernel
     dim3 threads(warp_size, n_warps, 1);
-    dim3 blocks(batch_size, seq_len / chunk_size, num_features / head_dim);
-
-    attention_kernel<head_dim, chunk_size, n_warps><<<blocks, threads, shared_mem_size>>>(
+    dim3 blocks(batch_size, (seq_len + chunk_size - 1) / chunk_size, num_features / head_dim);
+    
+    attention_kernel<head_dim, chunk_size, n_warps><<<dim3(blocks), dim3(threads), shared_mem_size>>>(
         batch_size, seq_len, num_features, 
         queries, keys, values, mask, output
     );
+    hipDeviceSynchronize();
 
     if (syncronize) {
         CHECK_CUDA_ERROR(hipDeviceSynchronize());

@@ -1,7 +1,0 @@
-README.md
-setup.py
-/data/zhaorong/code/fused-attention/src/fused_attn_extention.hip
-fused_attn.egg-info/PKG-INFO
-fused_attn.egg-info/SOURCES.txt
-fused_attn.egg-info/dependency_links.txt
-fused_attn.egg-info/top_level.txt

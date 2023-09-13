@@ -1,7 +1,9 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "fused_attn.cuh"
-
-#define LAUNCH_WITH_ARGS(head_dim, chunk_size)                              \
+#include <stdio.h>
+#define LAUNCH_WITH_ARGS(head_dim, chunk_size)                      \
     launch_attention_kernel<head_dim, chunk_size>(                          \
         batch_size, seq_len, num_features,                                  \
         (half_t*)queries.data_ptr<at::Half>(),                              \
@@ -43,14 +45,15 @@ torch::Tensor attention_forward(
 
     TORCH_CHECK(!(head_dim & (head_dim - 1)) && 16 <= head_dim && head_dim <= 128);
     TORCH_CHECK(!(chunk_size & (chunk_size - 1)) && 16 <= chunk_size && chunk_size <= 128 && chunk_size <= 2 * head_dim);
-    TORCH_CHECK(!(chunk_size == 16 && head_dim == 128));
+    // TORCH_CHECK(!(chunk_size == 16 && head_dim == 128));
 
     // Retrieve input dimensions
     const uint32_t batch_size = queries.size(0);
     const uint32_t seq_len = queries.size(1);
     const uint32_t num_features = queries.size(2);
 
-    // Check if other tensors have the same shape
+    // Check if other tensors have the same shape/*
+
     TORCH_CHECK(keys.size(0) == batch_size && 
                 keys.size(1) == seq_len &&
                 keys.size(2) == num_features);
@@ -59,8 +62,8 @@ torch::Tensor attention_forward(
                 values.size(1) == seq_len &&
                 values.size(2) == num_features);
 
-    TORCH_CHECK(seq_len % chunk_size == 0 &&
-                num_features % head_dim == 0);
+    // TORCH_CHECK(seq_len % chunk_size == 0 &&
+    //             num_features % head_dim == 0);
     
     // Allocate output tensor
     auto output = torch::empty(
@@ -68,6 +71,8 @@ torch::Tensor attention_forward(
         torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA)
     );
     
+    // auto stream = at::cuda::getCurrentCUDAStream().stream();
+
     switch (head_dim)
     {
     case 16:
@@ -100,6 +105,7 @@ torch::Tensor attention_forward(
     case 128:
         switch (chunk_size)
         {
+        case 16: LAUNCH_WITH_ARGS(128, 16); break;
         case 32: LAUNCH_WITH_ARGS(128, 32); break;
         case 64: LAUNCH_WITH_ARGS(128, 64); break;
         case 128: LAUNCH_WITH_ARGS(128, 128); break;

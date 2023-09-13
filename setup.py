@@ -20,7 +20,8 @@ setup(
                 "--no-offload-arch=gfx1030",
                 "--no-offload-arch=gfx900",
                 "--no-offload-arch=gfx906",
-                "--no-offload-arch=gfx908"
+                "--no-offload-arch=gfx908",
+                # "-Ddebug"
                 ],
         )
     ],
