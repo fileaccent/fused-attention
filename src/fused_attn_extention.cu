@@ -5,7 +5,7 @@
 #include <stdio.h>
 #define LAUNCH_WITH_ARGS(head_dim, chunk_size)                      \
     launch_attention_kernel<head_dim, chunk_size>(                          \
-        batch_size, seq_len, num_features,                                  \
+        batch_size, seq_len_q, seq_len_k, num_features,                     \
         (half_t*)queries.data_ptr<at::Half>(),                              \
         (half_t*)keys.data_ptr<at::Half>(),                                 \
         (half_t*)values.data_ptr<at::Half>(),                               \
@@ -49,17 +49,17 @@ torch::Tensor attention_forward(
 
     // Retrieve input dimensions
     const uint32_t batch_size = queries.size(0);
-    const uint32_t seq_len = queries.size(1);
+    const uint32_t seq_len_q = queries.size(1);
     const uint32_t num_features = queries.size(2);
-
+    const uint32_t seq_len_k = keys.size(1);
     // Check if other tensors have the same shape/*
-
+    // seq_len_q may not equal to seq_len_k and seq_len_v
     TORCH_CHECK(keys.size(0) == batch_size && 
-                keys.size(1) == seq_len &&
+                keys.size(1) == seq_len_k &&
                 keys.size(2) == num_features);
 
     TORCH_CHECK(values.size(0) == batch_size && 
-                values.size(1) == seq_len &&
+                values.size(1) == seq_len_k &&
                 values.size(2) == num_features);
 
     // TORCH_CHECK(seq_len % chunk_size == 0 &&
@@ -67,7 +67,7 @@ torch::Tensor attention_forward(
     
     // Allocate output tensor
     auto output = torch::empty(
-        {batch_size, seq_len, num_features},
+        {batch_size, seq_len_q, num_features},
         torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA)
     );
     

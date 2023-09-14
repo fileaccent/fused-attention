@@ -98,7 +98,7 @@ void threadblock_load_chunk(
     half_t* __restrict__ dst,
     uint32_t lds,
     uint32_t ldd,
-    uint32_t seq_len
+    uint32_t seq_len_q
 ) {
     constexpr uint32_t elements_per_storage = 4; // 8 half_t == 1x uint4 == 128 bit
     constexpr uint32_t n_threads = warp_size * n_warps;
@@ -115,7 +115,7 @@ void threadblock_load_chunk(
     const uint32_t col = storage_idx % width;
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        if (offset + row < seq_len) {
+        if (offset + row < seq_len_q) {
             *(uint2*)&dst[(offset + row) * ldd + col] = *(uint2*)&src[(offset + row) * lds + col];
         } else {
             dst[(offset + row) * ldd + col] = __float2half(0.0f);
@@ -212,7 +212,7 @@ void threadblock_divide_and_store_chunk(
     half_t* __restrict__ dst,
     uint32_t lds,
     uint32_t ldd,
-    uint32_t seq_len
+    uint32_t seq_len_q
 ) {
     constexpr uint32_t elements_per_storage = 2;
     constexpr uint32_t n_threads = warp_size * n_warps;
@@ -228,7 +228,7 @@ void threadblock_divide_and_store_chunk(
     const uint32_t col = storage_idx % width;
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        if (offset + row < seq_len) {
+        if (offset + row < seq_len_q) {
             *(half2_t*)&dst[(offset + row) * ldd + col] = __h2div(
                 *(half2_t*)&numer[(offset + row) * lds + col],
                 __half2half2(denom[offset + row])
@@ -356,7 +356,6 @@ void threadblock_gemm_k_real(
     uint32_t ldc,
     __half alpha = __float2half(1.0f)
 ) {
-    const uint32_t seq_len = k_real;
     constexpr uint32_t frag_cols_per_warp = n / (16 * n_warps); // num of columns processed by single warp (in terms of fragments)
     constexpr uint32_t frag_rows = m / 16; // num of fragments in rows in output matrix
     constexpr uint32_t frag_cols = n / 16; // num of fragments in cols in output matrix
@@ -400,28 +399,6 @@ void threadblock_gemm_k_real(
                 frag_b[frag_dim][frag_col_offset].x[1] = reg_B[1];
                 frag_b[frag_dim][frag_col_offset].x[2] = reg_B[2];
                 frag_b[frag_dim][frag_col_offset].x[3] = reg_B[3];
-                
-                // int n_index = threadIdx.x % 16;
-                // int m_index = threadIdx.x / 16;
-                // int B_m_index = m_index * 4;
-                // int B_n_index = n_index;
-                // int B_index = B_m_index * ldb + B_n_index;
-                // auto d_B = &mat_b[16 * (frag_dim + frag_col * ldb)];
-                // frag_b[frag_dim][frag_col_offset].x[0] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
-                // // fragB.x[0] = d_B[B_index];
-                // B_m_index++;
-                // B_index += ldb;
-                // frag_b[frag_dim][frag_col_offset].x[1] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
-                // // fragB.x[1] = d_B[B_index];
-                // B_m_index++;
-                // B_index += ldb;
-                // frag_b[frag_dim][frag_col_offset].x[2] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
-                // // fragB.x[2] = d_B[B_index];
-                // B_m_index++;
-                // B_index += ldb;
-                // frag_b[frag_dim][frag_col_offset].x[3] = 16 * frag_dim + B_m_index < n_real && 16 * frag_col + B_n_index < k_real ? d_B[B_index] : __float2half(0.0f);
-                // rocwmma::load_matrix_sync(frag_b[frag_dim][frag_col_offset],
-                //                     &mat_b[16 * (frag_dim + frag_col * ldb)], ldb);
             } else {
                 int n_index = threadIdx.x % 16;
                 int m_index = threadIdx.x / 16;
@@ -430,15 +407,12 @@ void threadblock_gemm_k_real(
                 int B_index = B_m_index * ldb + B_n_index;
                 auto d_B = &mat_b[16 * (frag_dim * ldb + frag_col)];
                 frag_b[frag_dim][frag_col_offset].x[0] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
-                // fragB.x[0] = d_B[B_index];
                 B_m_index++;
                 B_index += ldb;
                 frag_b[frag_dim][frag_col_offset].x[1] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
-                // fragB.x[1] = d_B[B_index];
                 B_m_index++;
                 B_index += ldb;
                 frag_b[frag_dim][frag_col_offset].x[2] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
-                // fragB.x[2] = d_B[B_index];
                 B_m_index++;
                 B_index += ldb;
                 frag_b[frag_dim][frag_col_offset].x[3] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
@@ -463,24 +437,6 @@ void threadblock_gemm_k_real(
                     rocwmma::mma_sync(frag_acc, mat_a_frags[frag_row][frag_dim], frag_b[frag_dim][frag_col_offset], frag_acc);
                 } else {
                     rocwmma::load_matrix_sync(frag_a, &mat_a[16 * (frag_row * lda) + 16 * frag_dim], lda);
-
-                    // int n_index = threadIdx.x / 16;
-                    // int m_index = threadIdx.x % 16;
-                    // int B_m_index = m_index;
-                    // int B_n_index = n_index * 4;
-
-                    // if (!(B_m_index < seq_len && B_n_index < seq_len)) {
-                    //     frag_a.x[0] = __float2half(0.0f);
-                    // }
-                    // if (!(B_m_index < seq_len && B_n_index + 1 < seq_len)) {
-                    //     frag_a.x[1] = __float2half(0.0f);
-                    // }
-                    // if (!(B_m_index < seq_len && B_n_index + 2 < seq_len)) {
-                    //     frag_a.x[2] = __float2half(0.0f);
-                    // }
-                    // if (!(B_m_index < seq_len && B_n_index + 3 < seq_len)) {
-                    //     frag_a.x[3] = __float2half(0.0f);
-                    // }
                     rocwmma::mma_sync(frag_acc, frag_a, frag_b[frag_dim][frag_col_offset], frag_acc);    
                 }
             }
@@ -702,13 +658,14 @@ void threadblock_row_broadcast_diff_and_exp(
     half_t* __restrict__ mat,
     const half_t* __restrict__ vec,
     uint32_t ldm,
-    uint32_t seq_len
+    uint32_t seq_len_q,
+    uint32_t seq_len_k
 ) {
-    constexpr uint32_t elements_per_storage = 2;
+    constexpr uint32_t elements_per_storage = 1;
     constexpr uint32_t n_threads = warp_size * n_warps;
     constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
 
-    static_assert(n_threads * elements_per_storage % width == 0);
+    // static_assert(n_threads * elements_per_storage % width == 0);
 
     const uint32_t lane_idx = threadIdx.x;
     const uint32_t warp_idx = threadIdx.y;
@@ -720,9 +677,10 @@ void threadblock_row_broadcast_diff_and_exp(
 
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        if ((offset + row) < seq_len && col < seq_len) {
+        if ((offset + row) < seq_len_q && col < seq_len_k) {
             const uint32_t idx = (offset + row) * ldm + col;
-            *(half2_t*)&mat[idx] = h2exp(__hsub2(*(half2_t*)&mat[idx], __half2half2(vec[offset + row])));
+            // *(half2_t*)&mat[idx] = h2exp(__hsub2(*(half2_t*)&mat[idx], __half2half2(vec[offset + row])));
+            mat[idx] = hexp(__hsub(mat[idx], vec[offset + row]));
         }
     }
 }
@@ -884,7 +842,8 @@ template <
 __global__
 void attention_kernel(
     uint32_t batch_size,
-    uint32_t seq_len,
+    uint32_t seq_len_q,
+    uint32_t seq_len_k,
     uint32_t num_features,
     const half_t* __restrict__ queries,
     const half_t* __restrict__ keys,
@@ -949,31 +908,35 @@ void attention_kernel(
     queries_chunk = numer;
     scores_chunk = &numer_local[16 * numer_local_ldm];
 
-    const uint32_t num_chanks = (seq_len + chunk_size - 1) / chunk_size;
+    const uint32_t num_chanks_k = (seq_len_k + chunk_size - 1) / chunk_size;
+    const uint32_t chunk_size_q_remain = seq_len_q % chunk_size;
+    const uint32_t chunk_size_k_remain = seq_len_k % chunk_size;
 
     const uint32_t batch_idx = blockIdx.x;
     const uint32_t q_row_chunk = blockIdx.y;
     const uint32_t head_col_chunk = blockIdx.z;
-
-    const uint32_t batch_offset = batch_idx * seq_len * num_features;
-    const uint32_t batch_offset_mask = batch_idx * seq_len * seq_len;
+    // seq_len of  q, k and v may not be the same.
+    const uint32_t batch_offset_q = batch_idx * seq_len_q * num_features;
+    const uint32_t batch_offset_k = batch_idx * seq_len_k * num_features;
+    const uint32_t batch_offset_mask = batch_idx * seq_len_q * seq_len_k;
 
     // row / col in the matrix of fixed batch_idx (seq_len, num_features)
     const uint32_t q_row = q_row_chunk * chunk_size;
     const uint32_t head_col = head_col_chunk * head_dim;
-    
+    const uint32_t chunk_size_q_real = (q_row_chunk == gridDim.y - 1 && chunk_size_q_remain > 0) ? chunk_size_q_remain : chunk_size;
+
     rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> query_frags[chunk_frags][head_frags];
     // batch_size, sequence_len, num_heads, head_dim
     // Load query chunk into shared memory
     threadblock_load_chunk<chunk_size, head_dim, n_warps>(
-        /*src = */ &queries[batch_offset + q_row * num_features + head_col],
+        /*src = */ &queries[batch_offset_q + q_row * num_features + head_col],
         /*dst = */ queries_chunk,
         /*lds = */ num_features,
         /*ldd = */ queries_chunk_ldm,
-        /*seq_len*/seq_len
+        /*seq_len_q*/chunk_size_q_real
     );
 
-    // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
     //     printf("queries_chunk: \n");
     //     for (int i = 0; i < chunk_size; i++) {
     //         for (int j = 0; j < head_dim; j++) {
@@ -995,18 +958,21 @@ void attention_kernel(
     }
 
     #pragma unroll(1)
-    for (uint32_t kv_row_chunk = 0; kv_row_chunk < num_chanks; kv_row_chunk++) {
+    for (uint32_t kv_row_chunk = 0; kv_row_chunk < num_chanks_k; kv_row_chunk++) {
         const uint32_t kv_row = kv_row_chunk * chunk_size;
-        
+        uint32_t chunk_size_k_real = chunk_size;
+        if (kv_row_chunk == num_chanks_k - 1 && chunk_size_k_remain > 0) {
+            chunk_size_k_real = chunk_size_k_remain;
+        }
         // scores_chunk = queries_chunk @ keys_chunk.T / sqrt(head_dim)
         threadblock_gemm_k_real< /*m=*/chunk_size, /*n=*/chunk_size, /*k=*/head_dim, n_warps,
                         /*transpose_b=*/true, /*alpha_is_one=*/false, /*preloaded_a_frags=*/true >(
             /*mat_a_frags=*/ query_frags,
             /*mat_a =*/ nullptr,
-            /*mat_b =*/ &keys[batch_offset + kv_row * num_features + head_col],
+            /*mat_b =*/ &keys[batch_offset_k + kv_row * num_features + head_col],
             /*mat_c =*/ scores_chunk,
-                      seq_len,
-                      seq_len,
+                      chunk_size_q_real,
+                      chunk_size_k_real,
                       head_dim,
             /*lda =*/ 0,
             /*ldb =*/ num_features,
@@ -1016,8 +982,8 @@ void attention_kernel(
         // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
 
         //     printf("scores_chunk: \n");
-        //     for (int i = 0; i < chunk_size; i++) {
-        //         for (int j = 0; j < chunk_size; j++) {
+        //     for (int i = 0; i < seq_len_q; i++) {
+        //         for (int j = 0; j < seq_len_k; j++) {
         //             printf("%.1f ", __half2float(scores_chunk[i * queries_chunk_ldm + j]));
         //         }
         //         printf("\n");
@@ -1034,9 +1000,9 @@ void attention_kernel(
             if (mask != nullptr) {
                 threadblock_ewise_sum<chunk_size, chunk_size, n_warps>(
                     /*mat_a =*/ scores_chunk,
-                    /*mat_b =*/ &mask[batch_offset_mask + q_row * seq_len + kv_row],
+                    /*mat_b =*/ &mask[batch_offset_mask + q_row * seq_len_k + kv_row],
                     /*lda =*/ scores_chunk_ldm,
-                    /*ldb =*/ seq_len
+                    chunk_size_k_real // ?
                 );
             }
         }
@@ -1067,7 +1033,8 @@ void attention_kernel(
                 /*matrix =*/ scores_chunk,
                 /*column =*/ scores_max,
                 /*ldm =*/ scores_chunk_ldm,
-                seq_len
+                chunk_size_q_real,
+                chunk_size_k_real
             );
         }
         // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
@@ -1103,11 +1070,11 @@ void attention_kernel(
                             /*transpose_b=*/false, /*alpha_is_one=*/true, /*preloaded_a_frags=*/false >(
                 /*mat_a_frags = */ nullptr,
                 /*mat_a = */ scores_chunk,
-                /*mat_b = */ &values[batch_offset + head_col],
+                /*mat_b = */ &values[batch_offset_k + head_col],
                 /*mat_c = */ numer,
-                /*m_real = */ seq_len,
+                /*m_real = */ chunk_size_q_real,
                 /*n_real = */ head_dim,
-                /*k_real = */ seq_len,
+                /*k_real = */ chunk_size_k_real,
                 /*lda = */ scores_chunk_ldm,
                 /*ldb = */ num_features,
                 /*ldc = */ numer_ldm
@@ -1147,7 +1114,8 @@ void attention_kernel(
                 /*matrix =*/ scores_chunk,
                 /*column =*/ scores_max_local,
                 /*ldm =*/ scores_chunk_ldm,
-                seq_len
+                chunk_size_q_real,
+                chunk_size_k_real
             );
         }
         
@@ -1172,11 +1140,11 @@ void attention_kernel(
                             /*transpose_b=*/false, /*alpha_is_one=*/true, /*preloaded_a_frags=*/false >(
                 /*mat_a_frags = */ nullptr,
                 /*mat_a = */ scores_chunk,
-                /*mat_b = */ &values[batch_offset + kv_row * num_features + head_col],
+                /*mat_b = */ &values[batch_offset_k + kv_row * num_features + head_col],
                 /*mat_c = */ numer_local,
-                /*m_real = */ seq_len,
+                /*m_real = */ chunk_size_q_real,
                 /*n_real = */ head_dim,
-                /*k_real = */ seq_len,
+                /*k_real = */ chunk_size_k_real,
                 /*lda = */ scores_chunk_ldm,
                 /*ldb = */ num_features,
                 /*ldc = */ numer_local_ldm
@@ -1205,17 +1173,18 @@ void attention_kernel(
     threadblock_divide_and_store_chunk<chunk_size, head_dim, n_warps>(
         /*numer = */ numer,
         /*denom = */ denom,
-        /*dst = */ &output[batch_offset + q_row * num_features + head_col],
+        /*dst = */ &output[batch_offset_q + q_row * num_features + head_col],
         /*lds = */ numer_ldm,
         /*ldd = */ num_features,
-        /*seq_len*/seq_len
+        /*seq_len*/chunk_size_q_real
     );
 }
 
 template <uint32_t head_dim, uint32_t chunk_size>
 void launch_attention_kernel(
     uint32_t batch_size,
-    uint32_t seq_len,
+    uint32_t seq_len_q,
+    uint32_t seq_len_k,
     uint32_t num_features,
     const half_t* queries,
     const half_t* keys,
@@ -1234,10 +1203,10 @@ void launch_attention_kernel(
     }
     // Call attention kernel
     dim3 threads(warp_size, n_warps, 1);
-    dim3 blocks(batch_size, (seq_len + chunk_size - 1) / chunk_size, num_features / head_dim);
+    dim3 blocks(batch_size, (seq_len_q + chunk_size - 1) / chunk_size, num_features / head_dim);
     
     attention_kernel<head_dim, chunk_size, n_warps><<<dim3(blocks), dim3(threads), shared_mem_size>>>(
-        batch_size, seq_len, num_features, 
+        batch_size, seq_len_q, seq_len_k, num_features, 
         queries, keys, values, mask, output
     );
     hipDeviceSynchronize();
