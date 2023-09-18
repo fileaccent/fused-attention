@@ -3,3 +3,4 @@ dist/
 fused_attn.egg-info/
 *.hip
 *.prehip
+*.pt

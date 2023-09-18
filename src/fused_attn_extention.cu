@@ -41,7 +41,8 @@ torch::Tensor attention_forward(
                 (mask->dtype() == torch::kFloat16 && 
                  mask->device().type() == torch::kCUDA && 
                  mask->is_contiguous() &&
-                 mask->dim() == 3));
+                 ((mask->dim() == 2) || (mask->dim() == 4 && mask -> sizes()[0] == 1 && mask -> sizes()[1] == 1))
+                ));
 
     TORCH_CHECK(!(head_dim & (head_dim - 1)) && 16 <= head_dim && head_dim <= 128);
     TORCH_CHECK(!(chunk_size & (chunk_size - 1)) && 16 <= chunk_size && chunk_size <= 128 && chunk_size <= 2 * head_dim);

@@ -55,8 +55,8 @@ __device__ half __hmax(half a, half b) {
 __device__ half2 __hmax2(half2 a, half2 b) {
     half tmp1;
     half tmp2;
-    tmp2 = __hgt(__high2half(a), __high2half(b)) ? __high2half(a) : __high2half(b);
-    tmp1 = __hgt(__low2half(a), __low2half(b)) ? __low2half(a) : __low2half(b);
+    tmp1 = __hmax(__low2half(a), __low2half(b));
+    tmp2 = __hmax(__high2half(a), __high2half(b));
     return __halves2half2(tmp1, tmp2);
 }
 /*
@@ -91,50 +91,91 @@ void threadblock_load_chunk(
     }
 }
 
+// load 1xwidth data, padding (height - 1) * width areas.
 template <uint32_t height, uint32_t width, uint32_t n_warps>
 __device__
-void threadblock_load_chunk(
+void threadblock_load_q_1xhead_dim(
     const half_t* __restrict__ src,
     half_t* __restrict__ dst,
     uint32_t lds,
     uint32_t ldd,
     uint32_t seq_len_q
 ) {
-    constexpr uint32_t elements_per_storage = 4; // 8 half_t == 1x uint4 == 128 bit
-    constexpr uint32_t n_threads = warp_size * n_warps;
-    constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+    if (width == 128) {
+        constexpr uint32_t n_threads = warp_size * n_warps;
+        constexpr uint32_t elements_per_storage = 2;
+        const uint32_t lane_idx = threadIdx.x;
+        const uint32_t warp_idx = threadIdx.y;
 
-    static_assert(n_threads * elements_per_storage % width == 0);
-
-    const uint32_t lane_idx = threadIdx.x;
-    const uint32_t warp_idx = threadIdx.y;
-
-    const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
-    
-    const uint32_t row = storage_idx / width;
-    const uint32_t col = storage_idx % width;
-    #pragma unroll
-    for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        if (offset + row < seq_len_q) {
-            *(uint2*)&dst[(offset + row) * ldd + col] = *(uint2*)&src[(offset + row) * lds + col];
-        } else {
-            dst[(offset + row) * ldd + col] = __float2half(0.0f);
-            dst[(offset + row) * ldd + col + 1] = __float2half(0.0f);
-            dst[(offset + row) * ldd + col + 2] = __float2half(0.0f);
-            dst[(offset + row) * ldd + col + 3] = __float2half(0.0f);
+        const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+        
+        // const uint32_t row = storage_idx / width;
+        const uint32_t col = storage_idx;
+        for (int offset = 0; offset < seq_len_q; offset++) {
+            *(float*)&dst[(offset) * ldd + col] = *(float*)&src[(offset) * lds + col];
         }
+        #pragma unroll
+        for (uint32_t offset = seq_len_q; offset < height; offset++) {
+            dst[(offset) * ldd + col] = __float2half(0.0f);
+            dst[(offset) * ldd + col + 1] = __float2half(0.0f);
+        }
+    } else if (width == 64) {
+        constexpr uint32_t n_threads = warp_size * n_warps;
+        constexpr uint32_t elements_per_storage = 1;
+        const uint32_t lane_idx = threadIdx.x;
+        const uint32_t warp_idx = threadIdx.y;
+
+        const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+        
+        // const uint32_t row = storage_idx / width;
+        const uint32_t col = storage_idx;
+        for (int offset = 0; offset < seq_len_q; offset++) {
+            dst[(offset) * ldd + col] = src[(offset) * lds + col];
+        }
+        #pragma unroll
+        for (uint32_t offset = seq_len_q; offset < height; offset++) {
+            dst[(offset) * ldd + col] = __float2half(0.0f);
+        }
+    } else {
+        constexpr uint32_t n_threads = warp_size * n_warps;
+        uint32_t elements_per_storage = (height * width + n_threads - 1) / n_threads; // 8 half_t == 1x uint4 == 128 bit
+        // uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+        // static_assert(n_threads * elements_per_storage % width == 0);
+
+        const uint32_t lane_idx = threadIdx.x;
+        const uint32_t warp_idx = threadIdx.y;
+
+        const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+
+        for (int elements_per_storage_index = 0; elements_per_storage_index < elements_per_storage; elements_per_storage_index++) {
+            const uint32_t row = (storage_idx + elements_per_storage_index) / width;
+            const uint32_t col = (storage_idx + elements_per_storage_index) % width;
+            if (col < width) {
+                if (row < seq_len_q) {
+                    dst[row * ldd + col] = src[row * lds + col];
+                } else {
+                    dst[row * ldd + col] = __float2half(0.0f);
+                }
+            }
+        }
+
+        // const uint32_t row = storage_idx / width;
+        // const uint32_t col = storage_idx % width;
+
+        // #pragma unroll
+        // for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+        //     if (offset + row < seq_len_q) {
+        //         for (int col_index = 0; col_index < elements_per_storage; col_index++) {
+        //             dst[(offset + row) * ldd + col] = src[(offset + row) * lds + col];
+        //         }
+        //     } else {
+        //         for (int col_index = 0; col_index < elements_per_storage; col_index++) {
+        //             dst[(offset + row) * ldd + col] = __float2half(0.0f);
+        //         }
+        //     }
+        // }
     }
-    // if (row < seq_len) {
-    //     #pragma unroll
-    //     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-    //         *(uint4*)&dst[(offset + row) * ldd + col] = *(uint4*)&src[(offset + row) * lds + col];
-    //     }
-    // } else {
-    //     #pragma unroll
-    //     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-    //         dst[(offset + row) * ldd + col] = __float2half(0.0f);
-    //     }
-    // }
 }
 
 /*
@@ -182,38 +223,6 @@ void threadblock_divide_and_store_chunk(
     uint32_t lds,
     uint32_t ldd
 ) {
-    constexpr uint32_t elements_per_storage = 1;
-    constexpr uint32_t n_threads = warp_size * n_warps;
-    constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
-
-    static_assert(n_threads * elements_per_storage % width == 0);
-
-    const uint32_t lane_idx = threadIdx.x;
-    const uint32_t warp_idx = threadIdx.y;
-    const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
-    
-    const uint32_t row = storage_idx / width;
-    const uint32_t col = storage_idx % width;
-
-    #pragma unroll
-    for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        *(half2_t*)&dst[(offset + row) * ldd + col] = __h2div(
-            *(half2_t*)&numer[(offset + row) * lds + col],
-            __half2half2(denom[offset + row])
-        );
-    }
-}
-
-template <uint32_t height, uint32_t width, uint32_t n_warps>
-__device__
-void threadblock_divide_and_store_chunk(
-    const half_t* __restrict__ numer,
-    const half_t* __restrict__ denom,
-    half_t* __restrict__ dst,
-    uint32_t lds,
-    uint32_t ldd,
-    uint32_t seq_len_q
-) {
     constexpr uint32_t elements_per_storage = 2;
     constexpr uint32_t n_threads = warp_size * n_warps;
     constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
@@ -228,20 +237,114 @@ void threadblock_divide_and_store_chunk(
     const uint32_t col = storage_idx % width;
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        if (offset + row < seq_len_q) {
-            *(half2_t*)&dst[(offset + row) * ldd + col] = __h2div(
-                *(half2_t*)&numer[(offset + row) * lds + col],
-                __half2half2(denom[offset + row])
-            );
-            // printf("%f %f \n", __half2float(numer[(offset + row) * lds + col]), __half2float(denom[offset + row]));
-            // dst[(offset + row) * ldd + col] = __hdiv(
-            //     numer[(offset + row) * lds + col],
-            //     denom[offset + row]
-            // );
-
-            // dst[(offset + row) * ldd + col] = numer[0];
-        }
+        *(half2_t*)&dst[col] = __h2div(
+            *(half2_t*)&numer[col],
+            __half2half2(denom[0])
+        );
     }
+}
+
+template <uint32_t height, uint32_t width, uint32_t n_warps>
+__device__
+void threadblock_divide_and_store_chunk(
+    const half_t* __restrict__ numer,
+    const half_t* __restrict__ denom,
+    half_t* __restrict__ dst,
+    uint32_t lds,
+    uint32_t ldd,
+    uint32_t seq_len_q
+) {
+    if (width == 128) {
+        constexpr uint32_t n_threads = warp_size * n_warps;
+        uint32_t elements_per_storage = 2;
+        // uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+        // static_assert(n_threads * elements_per_storage % width == 0);
+
+        const uint32_t lane_idx = threadIdx.x;
+        const uint32_t warp_idx = threadIdx.y;
+        const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+        
+        // const uint32_t row = storage_idx / width;
+        const uint32_t col = storage_idx;
+
+        for (int offset = 0; offset < seq_len_q; offset++) {
+            *(half2_t*)&dst[(offset) * ldd + col] = __h2div(*(half2_t*)&numer[(offset) * lds + col], __half2half2(denom[offset]));
+        }
+    } else if (width == 64) {
+        constexpr uint32_t n_threads = warp_size * n_warps;
+        uint32_t elements_per_storage = 1;
+        // uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+        // static_assert(n_threads * elements_per_storage % width == 0);
+
+        const uint32_t lane_idx = threadIdx.x;
+        const uint32_t warp_idx = threadIdx.y;
+        const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+        
+        // const uint32_t row = storage_idx / width;
+        const uint32_t col = storage_idx;
+
+        for (int offset = 0; offset < seq_len_q; offset++) {
+            dst[(offset) * ldd + col] = __hdiv(numer[(offset) * lds + col], denom[offset]);
+        }
+    } else {
+        constexpr uint32_t n_threads = warp_size * n_warps;
+        uint32_t elements_per_storage = (seq_len_q * width + n_threads - 1) / n_threads;
+        uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+        // static_assert(n_threads * elements_per_storage % width == 0);
+
+        const uint32_t lane_idx = threadIdx.x;
+        const uint32_t warp_idx = threadIdx.y;
+        const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+        
+        for (int elements_per_storage_index = 0; elements_per_storage_index < elements_per_storage; elements_per_storage_index++) {
+            const uint32_t row = (storage_idx + elements_per_storage_index) / width;
+            const uint32_t col = (storage_idx + elements_per_storage_index) % width;
+            if (row < seq_len_q && col < width) {
+                dst[row * ldd + col] = __hdiv(
+                numer[row * lds + col],
+                denom[row]);
+            }
+        }
+        // for (int offset = 0; offset < seq_len_q; offset++) {
+        //     if (offset + row < seq_len_q) {
+        //         for (int i = 0; i < elements_per_storage; i++) {
+        //             dst[(offset + row) * ldd + col + i] = __hdiv(
+        //             numer[(offset + row) * lds + col + i],
+        //             denom[offset + row]);
+        //         }
+        //     }
+        // }
+        // #pragma unroll
+        // for (uint32_t offset = seq_len_q; offset < height; offset++) {
+        //     dst[(offset) * ldd + col] = __float2half(0.0f);
+        // }
+
+        // if (col < width) {
+        //     dst[col] = __hdiv(
+        //         numer[col],
+        //         denom[0]
+        //     );
+        // }
+    }
+    // #pragma unroll
+    // for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+    //     if (offset + row < seq_len_q) {
+    //         *(half2_t*)&dst[(offset + row) * ldd + col] = __h2div(
+    //             *(half2_t*)&numer[(offset + row) * lds + col],
+    //             __half2half2(denom[offset + row])
+    //         );
+    //         // printf("%f %f \n", __half2float(numer[(offset + row) * lds + col]), __half2float(denom[offset + row]));
+    //         // dst[(offset + row) * ldd + col] = __hdiv(
+    //         //     numer[(offset + row) * lds + col],
+    //         //     denom[offset + row]
+    //         // );
+
+    //         // dst[(offset + row) * ldd + col] = numer[0];
+    //     }
+    // }
     // if (row < seq_len) {
     //     #pragma unroll
     //     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
@@ -341,7 +444,7 @@ void threadblock_gemm(
 }
 
 template < uint32_t m, uint32_t n, uint32_t k, int n_warps, 
-        bool transpose_b=false, bool alpha_is_one=true, bool preloaded_a_frags=false >
+        bool transpose_b=false, bool alpha_is_one=true, bool preloaded_a_frags=false>
 __device__
 void threadblock_gemm_k_real(
     rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> mat_a_frags[m / 16][k / 16],
@@ -357,7 +460,7 @@ void threadblock_gemm_k_real(
     __half alpha = __float2half(1.0f)
 ) {
     constexpr uint32_t frag_cols_per_warp = n / (16 * n_warps); // num of columns processed by single warp (in terms of fragments)
-    constexpr uint32_t frag_rows = m / 16; // num of fragments in rows in output matrix
+    constexpr uint32_t frag_rows = m / 16; // num of fragments in rows in output matrix =1
     constexpr uint32_t frag_cols = n / 16; // num of fragments in cols in output matrix
     constexpr uint32_t frag_dims = k / 16; // size of common dimention of a and b matrices (in fragments)
 
@@ -369,17 +472,18 @@ void threadblock_gemm_k_real(
     rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> frag_a;
     rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, rocwmma_half, mat_b_order> frag_b[frag_dims][frag_cols_per_warp];
     rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, rocwmma_half> frag_acc;
+    // rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float> frag_acc;
+    // rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, rocwmma_half> frag_c;
 
     const uint32_t warp_idx = threadIdx.y;
 
     // Load mat b to fragments distributed by cols between warps 
     // if n_warps is smaller than fragments' columns then one warp works with several columns
     #pragma unroll
-    for (uint32_t frag_dim = 0; frag_dim < frag_dims; ++frag_dim) {
+    for (uint32_t frag_dim = 0; frag_dim < frag_dims; ++frag_dim) { // k_loop
         #pragma unroll
-        for (uint32_t frag_col_offset = 0; frag_col_offset < frag_cols_per_warp; frag_col_offset++) {
+        for (uint32_t frag_col_offset = 0; frag_col_offset < frag_cols_per_warp; frag_col_offset++) { // n_loop
             const uint32_t frag_col = warp_idx * frag_cols_per_warp + frag_col_offset; 
-            
             if (transpose_b) {
                 int n_index = threadIdx.x / 16;
                 int m_index = threadIdx.x % 16;
@@ -399,6 +503,9 @@ void threadblock_gemm_k_real(
                 frag_b[frag_dim][frag_col_offset].x[1] = reg_B[1];
                 frag_b[frag_dim][frag_col_offset].x[2] = reg_B[2];
                 frag_b[frag_dim][frag_col_offset].x[3] = reg_B[3];
+
+                // rocwmma::load_matrix_sync(frag_b[frag_dim][frag_col_offset],
+                //                     &mat_b[16 * (frag_dim + frag_col * ldb)], ldb);
             } else {
                 int n_index = threadIdx.x % 16;
                 int m_index = threadIdx.x / 16;
@@ -416,6 +523,9 @@ void threadblock_gemm_k_real(
                 B_m_index++;
                 B_index += ldb;
                 frag_b[frag_dim][frag_col_offset].x[3] = 16 * frag_dim + B_m_index < k_real && 16 * frag_col + B_n_index < n_real ? d_B[B_index] : __float2half(0.0f);
+
+                // rocwmma::load_matrix_sync(frag_b[frag_dim][frag_col_offset],
+                //                     &mat_b[16 * (frag_dim * ldb + frag_col)], ldb);
             }
         }
     }
@@ -423,37 +533,37 @@ void threadblock_gemm_k_real(
     // Iter trough rows
     #pragma unroll
     for (uint32_t frag_row = 0; frag_row < frag_rows; ++frag_row) {
-
         // Iter trough columns of single warp
         #pragma unroll
-        for (uint32_t frag_col_offset = 0; frag_col_offset < frag_cols_per_warp; ++frag_col_offset) {
+        for (uint32_t frag_col_offset = 0; frag_col_offset < frag_cols_per_warp; ++frag_col_offset) { // n loop
             const uint32_t frag_col = warp_idx * frag_cols_per_warp + frag_col_offset;
 
             rocwmma::fill_fragment(frag_acc, __float2half(0.0f));
-            
+            // rocwmma::fill_fragment(frag_acc, (0.0f));
             #pragma unroll
-            for (uint32_t frag_dim = 0; frag_dim < frag_dims; ++frag_dim) {
+            for (uint32_t frag_dim = 0; frag_dim < frag_dims; ++frag_dim) { // k loop
                 if (preloaded_a_frags) {
                     rocwmma::mma_sync(frag_acc, mat_a_frags[frag_row][frag_dim], frag_b[frag_dim][frag_col_offset], frag_acc);
                 } else {
-                    rocwmma::load_matrix_sync(frag_a, &mat_a[16 * (frag_row * lda) + 16 * frag_dim], lda);
+                    rocwmma::load_matrix_sync(frag_a, &mat_a[16 * (frag_row * lda + frag_dim)], lda);
                     rocwmma::mma_sync(frag_acc, frag_a, frag_b[frag_dim][frag_col_offset], frag_acc);    
                 }
             }
-
+            // for(int t = 0; t < frag_acc.num_elements; t++) {
+            //     frag_c.x[t] = __float2half(frag_acc.x[t]);
+            // }
             // multiply result by alpha
             if (!alpha_is_one) {
                 for(int t = 0; t < frag_acc.num_elements; t++) {
+                    // frag_acc.x[t] = frag_acc.x[t] * __half2float(alpha);
+                    // frag_c.x[t] = __hmul(frag_c.x[t], alpha);
                     frag_acc.x[t] = __hmul(frag_acc.x[t], alpha);
                 }
             }
-
             rocwmma::store_matrix_sync(&mat_c[16 * (frag_row * ldc + frag_col)], frag_acc, ldc, rocwmma::mem_row_major);
         }
-
     }
 }
-
 /*
 * Calculates rowwise sums of matrix
 * Uses additional auxillary matrix which should be of size (height, 16) to store fragmens with rowwise sums into shared memory
@@ -480,6 +590,8 @@ void threadblock_row_sum(
     rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> frag_a;
     rocwmma::fragment<rocwmma::matrix_b, 16, 16, 16, rocwmma_half, rocwmma::col_major> frag_b;
     rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, rocwmma_half> frag_acc;
+    // rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float> frag_acc;
+    // rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, rocwmma_half> frag_c;
 
     rocwmma::fill_fragment(frag_b, __float2half(1.0f));
 
@@ -487,13 +599,17 @@ void threadblock_row_sum(
     for (uint32_t frag_row_offset = 0; frag_row_offset < frag_rows; frag_row_offset += n_warps) {
         const uint32_t frag_row = frag_row_offset + warp_idx;
         rocwmma::fill_fragment(frag_acc, __float2half(0.0f));
+        // rocwmma::fill_fragment(frag_acc, (0.0f));
 
         #pragma unroll
         for(uint32_t frag_col = 0; frag_col < frag_cols; ++frag_col) {
             rocwmma::load_matrix_sync(frag_a, &mat[16 * (frag_row * ldm + frag_col)], ldm);
             rocwmma::mma_sync(frag_acc, frag_a, frag_b, frag_acc);
         }
-
+        
+        // for(int t = 0; t < frag_acc.num_elements; t++) {
+        //     frag_c.x[t] = __float2half(frag_acc.x[t]);
+        // }
         // Store in transposed mem to obtain all row-wise sums in coaleced vector in aux memory
         rocwmma::store_matrix_sync(&aux[16 * frag_row], frag_acc, ldm_aux, rocwmma::mem_col_major);
     }
@@ -589,6 +705,48 @@ void threadblock_ewise_sum(
     }
 }
 
+template <uint32_t height, uint32_t width, uint32_t n_warps>
+__device__ 
+void threadblock_ewise_sum(
+    half_t* __restrict__ mat_a,
+    const half_t* __restrict__ mat_b,
+    uint32_t lda,
+    uint32_t ldb,
+    uint32_t seq_len_q,
+    uint32_t seq_len_k
+) {
+    constexpr uint32_t elements_per_storage = 2;
+    constexpr uint32_t n_threads = warp_size * n_warps;
+    constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
+
+    static_assert(n_threads * elements_per_storage % width == 0);
+
+    const uint32_t lane_idx = threadIdx.x;
+    const uint32_t warp_idx = threadIdx.y;
+
+    const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
+
+    const uint32_t row = storage_idx / width;
+    const uint32_t col = storage_idx % width;
+
+    #pragma unroll
+    for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
+        if (offset + row < seq_len_q) {
+            if (col + 1 < seq_len_k) {
+                const uint32_t idx_a = (offset + row) * lda + col;
+                const uint32_t idx_b = (offset + row) * ldb + col;
+
+                *(half2_t*)&mat_a[idx_a] = __hadd2(*(half2_t*)&mat_a[idx_a], *(half2_t*)&mat_b[idx_b]);
+            } else if (col < seq_len_k) {
+                const uint32_t idx_a = (offset + row) * lda + col;
+                const uint32_t idx_b = (offset + row) * ldb + col;
+
+                mat_a[idx_a] = __hadd(mat_a[idx_a], mat_b[idx_b]);
+            }
+        }
+    }
+}
+
 /*
 * Calculates rowwise maximum of matrix and stores it to given vector
 */
@@ -599,15 +757,17 @@ void threadblock_row_max(
     half_t* __restrict__ vec,
     half_t* __restrict__ aux,
     uint32_t ldm,
-    uint32_t ldm_aux
+    uint32_t ldm_aux,
+    uint32_t seq_len_q,
+    uint32_t seq_len_k
 ) {
     constexpr uint32_t elements_per_storage = 2;
     constexpr uint32_t n_threads = warp_size * n_warps;
     constexpr uint32_t threads_per_row = n_threads / height;
     constexpr uint32_t storage_per_thread = width * height / (n_threads * elements_per_storage);
 
-    static_assert(n_threads % height == 0);                               // can equally distribute threads between rows
-    static_assert(width % (threads_per_row * elements_per_storage) == 0); // can distribute elements between all threads in the same row
+    // static_assert(n_threads % height == 0);                               // can equally distribute threads between rows
+    // static_assert(width % (threads_per_row * elements_per_storage) == 0); // can distribute elements between all threads in the same row
 
     const uint32_t lane_idx = threadIdx.x;
     const uint32_t warp_idx = threadIdx.y;
@@ -618,34 +778,84 @@ void threadblock_row_max(
     const uint32_t row = storage_idx / width;
     const uint32_t col = storage_idx % width;
     const uint32_t col_aux = col / storage_per_thread;
+    // if (row >= seq_len_q || col >= seq_len_k) return;
+    // half2_t threadwise_val = *(half2_t*)&mat[row * ldm + col];
 
-    half2_t threadwise_val = *(half2_t*)&mat[row * ldm + col];
+    // #pragma unroll
+    // for (uint32_t i = 1; i < storage_per_thread; ++i) {
 
-    #pragma unroll
-    for (uint32_t i = 1; i < storage_per_thread; ++i) {
-        threadwise_val = __hmax2(threadwise_val, *(half2_t*)&mat[row * ldm + col + i * elements_per_storage]);
-    }
+    //     if (row < seq_len_q && col + i * elements_per_storage + 1 < seq_len_k) {
+    //         threadwise_val = __hmax2(threadwise_val, *(half2_t*)&mat[row * ldm + col + i * elements_per_storage]);
+    //     } else if (row < seq_len_q && col + i * elements_per_storage < seq_len_k) {
+    //         half_t mid_half = __hmax(__high2half(threadwise_val), mat[row * ldm + col + i * elements_per_storage]);
+    //         threadwise_val = __halves2half2(__low2half(threadwise_val), mid_half);
+    //     }
+    // }
 
-    if (threads_per_row == 1) {
-        vec[row] = __hmax(__high2half(threadwise_val), __low2half(threadwise_val));
-        return;
-    }
+    // if (threads_per_row == 1) {
+    //     vec[row] = __hmax(__high2half(threadwise_val), __low2half(threadwise_val));
+    //     return;
+    // }
 
-    *(half2_t*)&aux[row * ldm_aux + col_aux] = threadwise_val;
+    // *(half2_t*)&aux[row * ldm_aux + col_aux] = threadwise_val;
     
-    __syncthreads();
-
-    if (thread_idx < height) {
-        threadwise_val = *(half2_t*)&aux[thread_idx * ldm_aux];
-
+    // __syncthreads();
+    
+    if (thread_idx < seq_len_q) {
+        half max_val = mat[thread_idx * ldm];
+        // threadwise_val = *(half2_t*)&aux[thread_idx * ldm_aux];
+        // const uint32_t thread_per_real =  ((seq_len_k + storage_per_thread - 1) / storage_per_thread + elements_per_storage - 1) / (elements_per_storage);
         #pragma unroll
-        for (uint32_t i = 1; i < threads_per_row; ++i) {
-            threadwise_val = __hmax2(threadwise_val, *(half2_t*)&aux[thread_idx * ldm_aux + i * elements_per_storage]);
-        }
-    
-        vec[thread_idx] = __hmax(__high2half(threadwise_val), __low2half(threadwise_val));
+        for (uint32_t i = 1; i < seq_len_k; ++i) {
 
+            max_val = __hmax(max_val, mat[thread_idx * ldm + i]);
+            // threadwise_val = __hmax2(threadwise_val, *(half2_t*)&aux[thread_idx * ldm_aux + i * elements_per_storage]);
+        }
+
+        vec[thread_idx] = max_val;
+        // vec[thread_idx] = __hmax(__high2half(threadwise_val), __low2half(threadwise_val));
+        
     }
+
+    // __syncthreads();
+
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    //     printf("%f %f %f %f \n", __half2float(aux[0 * ldm_aux]), __half2float(aux[1 * ldm_aux]), __half2float(aux[2 * ldm_aux]), __half2float(aux[3 * ldm_aux]));
+    //     printf("%f \n", __half2float(aux[2 * ldm_aux + 0]));
+    //     printf("%f \n", __half2float(aux[2 * ldm_aux + 1]));
+    //     printf("%f \n", __half2float(aux[2 * ldm_aux + 2]));
+    //     printf("%f \n", __half2float(aux[2 * ldm_aux + 3]));
+    //     printf("%f \n", __half2float(vec[2]));
+    //     printf("mat: \n");
+    //     for (int i = 0; i < height; i++) {
+    //         for (int j = 0; j < width; j++) {
+    //             printf("%.1f ", __half2float(mat[i * ldm + j]));
+    //         }
+    //         printf("\n");
+    //     }
+    //     printf("\n");
+    // }
+
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+
+    //     printf("aux: \n");
+    //     for (int i = 0; i < height; i++) {
+    //         for (int j = 0; j < width; j++) {
+    //             printf("%.1f ", __half2float(aux[i * ldm_aux + j]));
+    //         }
+    //         printf("\n");
+    //     }
+    //     printf("\n");
+    // }
+
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+
+    //     printf("vec: \n");
+    //     for (int i = 0; i < height; i++) {
+    //         printf("%.1f ", __half2float(vec[i]));
+    //     }
+    //     printf("\n");
+    // }
 }
 
 /*
@@ -661,7 +871,7 @@ void threadblock_row_broadcast_diff_and_exp(
     uint32_t seq_len_q,
     uint32_t seq_len_k
 ) {
-    constexpr uint32_t elements_per_storage = 1;
+    constexpr uint32_t elements_per_storage = 2;
     constexpr uint32_t n_threads = warp_size * n_warps;
     constexpr uint32_t rows_per_iter = n_threads * elements_per_storage / width;
 
@@ -677,9 +887,15 @@ void threadblock_row_broadcast_diff_and_exp(
 
     #pragma unroll
     for (uint32_t offset = 0; offset < height; offset += rows_per_iter) {
-        if ((offset + row) < seq_len_q && col < seq_len_k) {
+        if ((offset + row) < seq_len_q && col + 1 < seq_len_k) {
             const uint32_t idx = (offset + row) * ldm + col;
-            // *(half2_t*)&mat[idx] = h2exp(__hsub2(*(half2_t*)&mat[idx], __half2half2(vec[offset + row])));
+            // mat[idx] = __float2half(expf(__half2float(__hsub(mat[idx], vec[offset + row]))));
+            // mat[idx + 1] = __float2half(expf(__half2float(__hsub(mat[idx + 1], vec[offset + row]))));
+            *(half2_t*)&mat[idx] = h2exp(__hsub2(*(half2_t*)&mat[idx], __half2half2(vec[offset + row])));
+            // mat[idx] = hexp(__hsub(mat[idx], vec[offset + row]));
+        } else if ((offset + row) < seq_len_q && col < seq_len_k) {
+            const uint32_t idx = (offset + row) * ldm + col;
+            // mat[idx] = __float2half(expf(__half2float(__hsub(mat[idx], vec[offset + row]))));
             mat[idx] = hexp(__hsub(mat[idx], vec[offset + row]));
         }
     }
@@ -707,7 +923,8 @@ void threadblock_aggregate_softmax(
     half_t* __restrict__ max_b,
     uint32_t lda,
     uint32_t ldb,
-    half_t* __restrict__ aux
+    half_t* __restrict__ aux,
+    uint32_t seq_len_q
 ) {
     constexpr uint32_t elements_per_storage = 2;
     constexpr uint32_t rows_per_iter = warp_size * n_warps * elements_per_storage / width;
@@ -717,7 +934,7 @@ void threadblock_aggregate_softmax(
 
     const uint32_t storage_idx = (warp_idx * warp_size + lane_idx) * elements_per_storage;
 
-    if (storage_idx < height) {
+    if (storage_idx + 1 < seq_len_q) {
         half2_t* __restrict__ a2_ptr = (half2_t*)&max_a[storage_idx];
         half2_t* __restrict__ b2_ptr = (half2_t*)&max_b[storage_idx];
         half2_t* __restrict__ max_ab2_ptr = (half2_t*)&aux[storage_idx];
@@ -728,6 +945,17 @@ void threadblock_aggregate_softmax(
         
         *(half2_t*)&denom_a[storage_idx] = __hadd2(__hmul2(*a2_ptr, *(half2_t*)&denom_a[storage_idx]),
                                                 __hmul2(*b2_ptr, *(half2_t*)&denom_b[storage_idx]));
+    } else if (storage_idx < seq_len_q) {
+        half_t* __restrict__ a_ptr = &max_a[storage_idx];
+        half_t* __restrict__ b_ptr = &max_b[storage_idx];
+        half_t* __restrict__ max_ab_ptr = &aux[storage_idx];
+        half_t mid_value = *a_ptr;
+        *max_ab_ptr = __hmax(*a_ptr, *b_ptr);
+        *a_ptr = hexp(__hsub(*a_ptr, *max_ab_ptr));
+        *b_ptr = hexp(__hsub(*b_ptr, *max_ab_ptr));
+        
+        denom_a[storage_idx] = __hadd(__hmul(*a_ptr, denom_a[storage_idx]),
+                                                __hmul(*b_ptr, denom_b[storage_idx]));
     }
 
     __syncthreads();
@@ -740,14 +968,15 @@ void threadblock_aggregate_softmax(
         const uint32_t idx_a = (offset + row) * lda + col;
         const uint32_t idx_b = (offset + row) * ldb + col;
 
-
-        *(half2_t*)&numer_a[idx_a] = __hadd2(__hmul2(__half2half2(max_a[offset + row]), *(half2_t*)&numer_a[idx_a]),
+        if (offset + row < seq_len_q) {
+            *(half2_t*)&numer_a[idx_a] = __hadd2(__hmul2(__half2half2(max_a[offset + row]), *(half2_t*)&numer_a[idx_a]),
                                             __hmul2(__half2half2(max_b[offset + row]), *(half2_t*)&numer_b[idx_b]));
+        }
     }
 
     __syncthreads();
     
-    if (storage_idx < height) {
+    if (storage_idx < seq_len_q) {
         *(half2_t*)&max_a[storage_idx] = *(half2_t*)&aux[storage_idx];
     }
 }
@@ -840,7 +1069,7 @@ template <
     uint32_t n_warps
 >
 __global__
-void attention_kernel(
+__launch_bounds__(64) void attention_kernel(
     uint32_t batch_size,
     uint32_t seq_len_q,
     uint32_t seq_len_k,
@@ -907,7 +1136,9 @@ void attention_kernel(
 
     queries_chunk = numer;
     scores_chunk = &numer_local[16 * numer_local_ldm];
-
+    
+    // const uint32_t chunk_size_q = 16;
+    // const uint32_t chunk_size_k = chunk_size;
     const uint32_t num_chanks_k = (seq_len_k + chunk_size - 1) / chunk_size;
     const uint32_t chunk_size_q_remain = seq_len_q % chunk_size;
     const uint32_t chunk_size_k_remain = seq_len_k % chunk_size;
@@ -928,7 +1159,7 @@ void attention_kernel(
     rocwmma::fragment<rocwmma::matrix_a, 16, 16, 16, rocwmma_half, rocwmma::row_major> query_frags[chunk_frags][head_frags];
     // batch_size, sequence_len, num_heads, head_dim
     // Load query chunk into shared memory
-    threadblock_load_chunk<chunk_size, head_dim, n_warps>(
+    threadblock_load_q_1xhead_dim<chunk_size, head_dim, n_warps>(
         /*src = */ &queries[batch_offset_q + q_row * num_features + head_col],
         /*dst = */ queries_chunk,
         /*lds = */ num_features,
@@ -979,11 +1210,10 @@ void attention_kernel(
             /*ldc =*/ scores_chunk_ldm,
             /*alpha =*/ __float2half(rsqrtf(head_dim))
         );
-        // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
         //     printf("scores_chunk: \n");
-        //     for (int i = 0; i < seq_len_q; i++) {
-        //         for (int j = 0; j < seq_len_k; j++) {
+        //     for (int i = 0; i < chunk_size; i++) {
+        //         for (int j = 0; j < chunk_size; j++) {
         //             printf("%.1f ", __half2float(scores_chunk[i * queries_chunk_ldm + j]));
         //         }
         //         printf("\n");
@@ -1000,9 +1230,11 @@ void attention_kernel(
             if (mask != nullptr) {
                 threadblock_ewise_sum<chunk_size, chunk_size, n_warps>(
                     /*mat_a =*/ scores_chunk,
-                    /*mat_b =*/ &mask[batch_offset_mask + q_row * seq_len_k + kv_row],
+                    /*mat_b =*/ &mask[q_row * seq_len_k + kv_row],
                     /*lda =*/ scores_chunk_ldm,
-                    chunk_size_k_real // ?
+                    seq_len_k,
+                    chunk_size_q_real,
+                    chunk_size_k_real
                 );
             }
         }
@@ -1013,11 +1245,12 @@ void attention_kernel(
                 /*column =*/ scores_max,
                 /*aux_memory =*/ aux_mem,
                 /*ldm =*/ scores_chunk_ldm,
-                /*ldm_aux =*/ reduce_max_ldm
+                /*ldm_aux =*/ reduce_max_ldm,
+                chunk_size_q_real,
+                chunk_size_k_real
             );
         }
-        // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
         //     printf("scores_max: \n");
         //     for (int i = 0; i < chunk_size; i++) {
         //         printf("%.1f ", __half2float(scores_max[i]));
@@ -1037,11 +1270,10 @@ void attention_kernel(
                 chunk_size_k_real
             );
         }
-        // if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-
-        //     printf("scores_chunk_row_broadcast_diff_and_exp: \n");
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        //     printf("diff_and_exp: \n");
         //     for (int i = 0; i < chunk_size; i++) {
-        //         for (int j = 0; j < head_dim; j++) {
+        //         for (int j = 0; j < chunk_size; j++) {
         //             printf("%.1f ", __half2float(scores_chunk[i * queries_chunk_ldm + j]));
         //         }
         //         printf("\n");
@@ -1081,17 +1313,17 @@ void attention_kernel(
             );
 
         }
-    //    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+        // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
 
-    //         printf("numer: \n");
-    //         for (int i = 0; i < chunk_size; i++) {
-    //             for (int j = 0; j < head_dim; j++) {
-    //                 printf("%.1f ", __half2float(numer[i * queries_chunk_ldm + j]));
-    //             }
-    //             printf("\n");
-    //         }
-    //         printf("\n");
-    //     }
+        //     printf("numer: \n");
+        //     for (int i = 0; i < chunk_size; i++) {
+        //         for (int j = 0; j < head_dim; j++) {
+        //             printf("%.1f ", __half2float(numer[i * queries_chunk_ldm + j]));
+        //         }
+        //         printf("\n");
+        //     }
+        //     printf("\n");
+        // }
 
         // Second and further iterations, write to temprorary numer_local, denom_local, scores_max_local, then aggregate with prev values
 
@@ -1102,7 +1334,9 @@ void attention_kernel(
                 /*column =*/ scores_max_local,
                 /*aux_memory =*/ aux_mem,
                 /*ldm =*/ scores_chunk_ldm,
-                /*ldm_aux =*/ reduce_max_ldm
+                /*ldm_aux =*/ reduce_max_ldm,
+                chunk_size_q_real,
+                chunk_size_k_real
             );
         }
 
@@ -1163,13 +1397,35 @@ void attention_kernel(
                 /*max_b = */ scores_max_local,
                 /*lda =*/ numer_ldm,
                 /*ldb =*/ numer_local_ldm,
-                /*aux =*/ aux_mem
+                /*aux =*/ aux_mem,
+                chunk_size_k_real
             );
         }
     }
 
     __syncthreads();
     
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+
+    //     printf("numer: \n");
+    //     for (int i = 0; i < chunk_size; i++) {
+    //         for (int j = 0; j < head_dim; j++) {
+    //             printf("%.1f ", __half2float(numer[i * queries_chunk_ldm + j]));
+    //         }
+    //         printf("\n");
+    //     }
+    //     printf("\n");
+    // }
+
+    // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+
+    //     printf("denom: \n");
+    //     for (int i = 0; i < chunk_size; i++) {
+    //         printf("%.1f ", __half2float(denom[i]));
+    //     }
+    //     printf("\n");
+    // }
+
     threadblock_divide_and_store_chunk<chunk_size, head_dim, n_warps>(
         /*numer = */ numer,
         /*denom = */ denom,
@@ -1209,6 +1465,7 @@ void launch_attention_kernel(
         batch_size, seq_len_q, seq_len_k, num_features, 
         queries, keys, values, mask, output
     );
+
     hipDeviceSynchronize();
 
     if (syncronize) {
