@@ -31,7 +31,7 @@ def attention_float(queries, keys, values, head_dim, mask=None):
     queries = queries.view(batch_size, sequence_len_q, num_heads, head_dim).transpose(1, 2).float()
     keys = keys.view(batch_size, sequence_len_k, num_heads, head_dim).transpose(1, 2).float()
     values = values.view(batch_size, sequence_len_k, num_heads, head_dim).transpose(1, 2).float()
-    print("mask", mask.shape)
+    # print("mask", mask.shape)
     scores = (queries @ keys.mT) / (head_dim ** 0.5)
     if mask is not None:
         # mask = mask
