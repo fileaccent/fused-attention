@@ -6,14 +6,14 @@ import fused_attn
 from naive_implementation import attention, attention_float
 import numpy as np
 def bench():
-    batch_size = 4
+    batch_size = 1
     sequence_len_q = 1
-    sequence_len_k = 112
-    num_heads = 20
+    sequence_len_k = 128
+    num_heads = 40
     head_dim = 128
     chunk_size = 16
     num_features = num_heads * head_dim
-    num_batchs = 128    
+    num_batchs = 200   
     
     torch.random.manual_seed(179)
 
@@ -28,62 +28,77 @@ def bench():
         queries = torch.randn((batch_size, sequence_len_q, num_features), device="cuda",dtype=torch.half)
         keys =    torch.randn((batch_size, sequence_len_k, num_features), device="cuda",dtype=torch.half)
         values =  torch.randn((batch_size, sequence_len_k, num_features), device="cuda",dtype=torch.half)
+
+        queries_trans = queries.view(queries.shape[0], queries.shape[1], num_heads, head_dim).transpose(1, 2).contiguous()
+        keys_trans = keys.view(keys.shape[0], keys.shape[1], num_heads, head_dim).transpose(1, 2).contiguous()
+        values_trans = values.view(values.shape[0], values.shape[1], num_heads, head_dim).transpose(1, 2).contiguous()
         mask = None
-        # queries = torch.load('/data/zhaorong/code/fused-attention/xq_fu.pt').cuda().half()
-        # keys = torch.load('/data/zhaorong/code/fused-attention/keys_fu.pt').cuda().half()
-        # values = torch.load('/data/zhaorong/code/fused-attention/values_fu.pt').cuda().half()
-        # mask = torch.load('/data/zhaorong/code/fused-attention/mask_fu.pt').cuda().half()
-        # print(queries.device)
-        # print(keys.device)
-        # print(values.device)
-        # # print(batch_size, sequence_len_q, sequence_len_k, num_heads, head_dim)
-        # # time.sleep(10) # cooldown gpu after tensors' initialization
+        # print(queries_trans.shape)
+        # print(keys_trans.shape)
+        # # queries = torch.load('/data/zhaorong/code/fused-attention/xq_fu.pt').cuda().half()
+        # # keys = torch.load('/data/zhaorong/code/fused-attention/keys_fu.pt').cuda().half()
+        # # values = torch.load('/data/zhaorong/code/fused-attention/values_fu.pt').cuda().half()
+        # # mask = torch.load('/data/zhaorong/code/fused-attention/mask_fu.pt').cuda().half()
+        # # print(queries.device)
+        # # print(keys.device)
+        # # print(values.device)
+        # # # print(batch_size, sequence_len_q, sequence_len_k, num_heads, head_dim)
+        # # # time.sleep(10) # cooldown gpu after tensors' initialization
 
         # # time.sleep(20) # cooldown gpu after calculations
-        # _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
-        # start = time.time()
-        # for _ in range(num_batchs):
-        #     _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
-        # torch.cuda.synchronize()
-        # end = time.time()
+        _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
+        _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
+        _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
+        start = time.time()
+        for _ in range(num_batchs):
+            _ = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values)
+        torch.cuda.synchronize()
+        end = time.time()
 
-        # fused_ms = (end - start) / num_batchs * 1000
+        fused_ms = (end - start) / num_batchs * 1000
 
-        # _ = fused_attn.attention_forward_trans(head_dim, chunk_size, queries, keys, values)
-        # start = time.time()
-        # for _ in range(num_batchs):
-        #     _ = fused_attn.attention_forward_trans(head_dim, chunk_size, queries, keys, values)
-        # torch.cuda.synchronize()
-        # end = time.time()
 
-        # fused_trans_ms = (end - start) / num_batchs * 1000
+        _ = attention(queries, keys, values, head_dim, mask)
+        _ = attention(queries, keys, values, head_dim, mask)
+        _ = attention(queries, keys, values, head_dim, mask)
+        start = time.time()
+        for i in range(num_batchs):
+            _ = attention(queries, keys, values, head_dim, mask)
+        torch.cuda.synchronize()
+        end = time.time()
+
+        naive_ms = (end - start) / num_batchs * 1000
+
+        _ = fused_attn.attention_forward_trans(head_dim, chunk_size, queries_trans, keys_trans, values_trans)
+        _ = fused_attn.attention_forward_trans(head_dim, chunk_size, queries_trans, keys_trans, values_trans)
+        _ = fused_attn.attention_forward_trans(head_dim, chunk_size, queries_trans, keys_trans, values_trans)
+        start = time.time()
+        for _ in range(num_batchs):
+            _ = fused_attn.attention_forward_trans(head_dim, chunk_size, queries_trans, keys_trans, values_trans)
+        torch.cuda.synchronize()
+        end = time.time()
+
+        fused_trans_ms = (end - start) / num_batchs * 1000
         
-        # _ = attention_float(queries, keys, values, head_dim, mask)
-        # start = time.time()
-        # for i in range(num_batchs):
-        #     _ = attention_float(queries, keys, values, head_dim, mask)
-        # torch.cuda.synchronize()
-        # end = time.time()
 
-        # naive_ms = (end - start) / num_batchs * 1000
-
-        # print(f"Naive {naive_ms:.4f} ms")
-        # print(f"Fused {fused_ms:.4f} ms")
-        # print(f"Fused_trans {fused_trans_ms:.4f} ms")
+        print(f"Naive {naive_ms:.4f} ms")
+        print(f"Fused {fused_ms:.4f} ms")
+        print(f"Fused_trans {fused_trans_ms:.4f} ms")
         
-        output = attention_float(queries, keys, values, head_dim, mask)
+        output = attention(queries, keys, values, head_dim, mask)
 
         output_fu = fused_attn.attention_forward(head_dim, chunk_size, queries, keys, values, mask)
-        # output_fu_trans = fused_attn.attention_forward_trans(head_dim, chunk_size, queries, keys, values, mask)
+        output_fu_trans = fused_attn.attention_forward_trans(head_dim, chunk_size, queries_trans, keys_trans, values_trans)
         
-        # print("output:", output)
-        # print("output_fu:", output_fu)
-        # # print("output_fu_trans:", output_fu_trans)
+        output_fu_trans = output_fu_trans.view(batch_size, sequence_len_q, num_features)
+        # print("output:", output.shape)
+        # print("output_fu:", output_fu.shape)
+        # print("output_fu_trans:", output_fu_trans.shape)
         # # print("output_error:", np.array((output - output_fu)[0][0].cpu()).tolist()[0:16])
         # absolute_index = (output - output_fu).abs().argmax()
         absolute_error = (output - output_fu).abs().max().item()
-        # absolute_trans_error = (output - output_fu_trans).abs().max().item()
-        print(absolute_error)
+        absolute_trans_error = (output - output_fu_trans).abs().max().item()
+        # print(absolute_error)
         # # print(queries)
         # # print(keys)
         # # print(values)
@@ -104,6 +119,6 @@ def bench():
         #     # print("output_fu:", output_fu)
         #     break
         # # print(absolute_error, relative_error, output.flatten()[absolute_index], output_fu.flatten()[absolute_index], output.flatten()[relative_index], output_fu.flatten()[relative_index])
-        # print(absolute_error, absolute_trans_error)
+        print(absolute_error, absolute_trans_error)
 if __name__ == "__main__":
     bench()

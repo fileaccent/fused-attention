@@ -170,41 +170,21 @@ torch::Tensor attention_forward_trans(
                  mask->is_contiguous() &&
                  ((mask->dim() == 2) || (mask->dim() == 4 && mask -> sizes()[0] == 1 && mask -> sizes()[1] == 1))
                 ));
-    TORCH_CHECK(!(head_dim & (head_dim - 1)) && 16 <= head_dim && head_dim <= 128);
-    TORCH_CHECK(!(chunk_size & (chunk_size - 1)) && 16 <= chunk_size && chunk_size <= 128 && chunk_size <= 2 * head_dim);
-    // TORCH_CHECK(!(chunk_size == 16 && head_dim == 128));
 
     // Retrieve input dimensions
     const uint32_t batch_size = queries.size(0);
-    const uint32_t seq_len_q = queries.size(1);
-    uint32_t num_features = queries.size(2);
-    if (queries.dim() == 4) {
-        num_features = queries.size(2) * queries.size(3);
-    }
-    const uint32_t seq_len_k = keys.size(1);
-    // Check if other tensors have the same shape/*
-    // seq_len_q may not equal to seq_len_k and seq_len_v
-    // TORCH_CHECK(keys.size(0) == batch_size && 
-    //             keys.size(1) == seq_len_k &&
-    //             keys.size(2) == num_features);
-
-    // TORCH_CHECK(values.size(0) == batch_size && 
-    //             values.size(1) == seq_len_k &&
-    //             values.size(2) == num_features);
-
-    queries = queries.view({queries.size(0), queries.size(1), num_features / head_dim, head_dim});
-    keys = keys.view({keys.size(0), keys.size(1), num_features / head_dim, head_dim});
-    values = values.view({values.size(0), values.size(1), num_features / head_dim, head_dim});
-    queries = queries.transpose(1, 2).contiguous();
-    keys = keys.transpose(1, 2).contiguous();
-    values = values.transpose(1, 2).contiguous();
-
-    // TORCH_CHECK(seq_len % chunk_size == 0 &&
-    //             num_features % head_dim == 0);
+    const uint32_t num_heads = queries.size(1);
+    const uint32_t seq_len_q = queries.size(2);
+    // const uint32_t head_dim = queries.size(3);
+    const uint32_t num_features = num_heads * head_dim;
+    // if (queries.dim() == 4) {
+    //     num_features = queries.size(2) * queries.size(3);
+    // }
+    const uint32_t seq_len_k = keys.size(2);
     
     // Allocate output tensor
     auto output = torch::empty(
-        {batch_size, num_features / head_dim, seq_len_q, head_dim},
+        {batch_size, seq_len_q, num_heads, head_dim},
         torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA)
     );
     
@@ -254,9 +234,9 @@ torch::Tensor attention_forward_trans(
 
     // Check if kernel invocation done well
     CHECK_LAST_CUDA_ERROR();
-    output = output.view({batch_size, num_features / head_dim, seq_len_q, head_dim});
-    output = output.transpose(1, 2);
-    output = output.contiguous().view({batch_size, seq_len_q, num_features});
+    // output = output.view({batch_size, seq_len_q, num_heads, head_dim});
+    // output = output.transpose(1, 2);
+    // output = output.contiguous().view({batch_size, seq_len_q, num_features});
     return output;
 }
 

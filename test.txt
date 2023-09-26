@@ -3,45 +3,4 @@
 Total number of unsupported CUDA function calls: 0
 
 
-Total number of replaced kernel launches: 3
-running install
-running bdist_egg
-running egg_info
-creating fused_attn.egg-info
-writing fused_attn.egg-info/PKG-INFO
-writing dependency_links to fused_attn.egg-info/dependency_links.txt
-writing top-level names to fused_attn.egg-info/top_level.txt
-writing manifest file 'fused_attn.egg-info/SOURCES.txt'
-reading manifest file 'fused_attn.egg-info/SOURCES.txt'
-writing manifest file 'fused_attn.egg-info/SOURCES.txt'
-installing library code to build/bdist.linux-x86_64/egg
-running install_lib
-running build_ext
-building 'fused_attn' extension
-creating /data/zhaorong/code/fused-attention/build
-creating /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38
-creating /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38/data
-creating /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38/data/zhaorong
-creating /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38/data/zhaorong/code
-creating /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38/data/zhaorong/code/fused-attention
-creating /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38/data/zhaorong/code/fused-attention/src
-Emitting ninja build file /data/zhaorong/code/fused-attention/build/temp.linux-x86_64-cpython-38/build.ninja...
-Compiling objects...
-Using envvar MAX_JOBS (32) as the number of workers...
-ninja: build stopped: interrupted by user.
-Traceback (most recent call last):
-  File "/opt/conda/bin/ninja", line 8, in <module>
-    sys.exit(ninja())
-  File "/opt/conda/lib/python3.8/site-packages/ninja/__init__.py", line 51, in ninja
-    raise SystemExit(_program('ninja', sys.argv[1:]))
-  File "/opt/conda/lib/python3.8/site-packages/ninja/__init__.py", line 47, in _program
-    return subprocess.call([os.path.join(BIN_DIR, name)] + args, close_fds=False)
-  File "/opt/conda/lib/python3.8/subprocess.py", line 342, in call
-    return p.wait(timeout=timeout)
-  File "/opt/conda/lib/python3.8/subprocess.py", line 1083, in wait
-    return self._wait(timeout=timeout)
-  File "/opt/conda/lib/python3.8/subprocess.py", line 1806, in _wait
-    (pid, sts) = self._try_wait(0)
-  File "/opt/conda/lib/python3.8/subprocess.py", line 1764, in _try_wait
-    (pid, sts) = os.waitpid(self.pid, wait_flags)
-KeyboardInterrupt
+Total number of replaced kernel launches: 4
